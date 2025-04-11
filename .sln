@@ -4,6 +4,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "VsrReplica", "VsrReplica\Vs
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "VsrClient", "VsrClient\VsrClient.csproj", "{9D93A238-234C-451D-9D63-1CDA62BDAFFD}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "VsrTests", "VsrTests\VsrTests.csproj", "{12459CFB-307D-467A-94EE-B45413C4FA61}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -18,5 +20,9 @@ Global
 		{9D93A238-234C-451D-9D63-1CDA62BDAFFD}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{9D93A238-234C-451D-9D63-1CDA62BDAFFD}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{9D93A238-234C-451D-9D63-1CDA62BDAFFD}.Release|Any CPU.Build.0 = Release|Any CPU
+		{12459CFB-307D-467A-94EE-B45413C4FA61}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{12459CFB-307D-467A-94EE-B45413C4FA61}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{12459CFB-307D-467A-94EE-B45413C4FA61}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{12459CFB-307D-467A-94EE-B45413C4FA61}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 EndGlobal
