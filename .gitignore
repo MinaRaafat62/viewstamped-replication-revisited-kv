@@ -1,1 +1,26 @@
-.idea
+# .NET Core
+bin/
+obj/
+out/
+*.suo
+*.user
+*.userosscache
+*.cache
+*.dll
+*.exe
+*.pdb
+*.nupkg
+*.bak
+*.tmp
+*.log
+*.vspscc
+*.vssscc
+.vs/
+appsettings.json
+
+# Rider
+.idea/
+
+# macOS
+.DS_Store
+
