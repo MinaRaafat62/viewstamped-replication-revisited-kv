@@ -1,6 +1,7 @@
 using System.IO.Pipelines;
 using System.Net.Sockets;
 using System.Buffers;
+using System.Net;
 using Serilog;
 using VsrReplica.Networking.Interfaces;
 
@@ -28,6 +29,8 @@ public class Connection : IAsyncDisposable
 
     public bool IsClosed => _socketDisposed;
 
+    public EndPoint? RemoteEndPoint;
+
     public Connection(ISocket socket, ISenderPool senderPool, IReceiver receiver,
         PipeScheduler transportScheduler, PipeScheduler applicationScheduler,
         MemoryPool<byte> memoryPool)
@@ -43,6 +46,7 @@ public class Connection : IAsyncDisposable
             transportScheduler, applicationScheduler,
             useSynchronizationContext: false));
         Input = _applicationPipe.Reader;
+        RemoteEndPoint = socket.RemoteEndPoint;
     }
 
 

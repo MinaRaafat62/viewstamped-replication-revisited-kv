@@ -1,4 +1,5 @@
 using System.Diagnostics.CodeAnalysis;
+using System.Net;
 using System.Net.Sockets;
 using VsrReplica.Networking.Interfaces;
 
@@ -7,6 +8,8 @@ namespace VsrReplica.Networking.Transport;
 public class SocketWrapper(Socket socket) : ISocket
 {
     private readonly Socket _socket = socket ?? throw new ArgumentNullException(nameof(socket));
+
+    public EndPoint? RemoteEndPoint => _socket.RemoteEndPoint;
 
     public bool SendAsync(SocketAsyncEventArgs e)
     {
