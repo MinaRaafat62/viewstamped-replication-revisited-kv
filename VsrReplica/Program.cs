@@ -6,7 +6,7 @@ static void ConfigureLogging()
     Log.Logger = new LoggerConfiguration()
         .Enrich.WithExceptionDetails()
         .WriteTo.Console()
-        .MinimumLevel.Information()
+        .MinimumLevel.Debug()
         .CreateLogger();
 }
 
