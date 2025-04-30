@@ -98,7 +98,7 @@ public class ReplicaLifecycleManager : IDisposable
         }
     }
 
-    public async Task HandlePrimaryTimeout()
+    public Task HandlePrimaryTimeout()
     {
         // Log.Warning("Replica {ReplicaId}: Handling PrimaryTimeout event. Current View: {View}, Status: {Status}",
         //     _state.Replica, _state.View, _state.Status);
@@ -147,6 +147,7 @@ public class ReplicaLifecycleManager : IDisposable
         //         nextView);
         // }
         // // Note: UpdateTimerStates will be called after this handler finishes in the main loop.
+        return Task.CompletedTask;
     }
 
 

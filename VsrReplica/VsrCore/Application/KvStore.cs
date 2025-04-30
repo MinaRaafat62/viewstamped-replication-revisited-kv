@@ -38,7 +38,7 @@ public class KvStore : IStateMachine
             case Operation.Get:
                 // Key is the entire payload for GET
                 key = Encoding.UTF8.GetString(data);
-                if (_store.TryGetValue(key, out value))
+                if (_store.TryGetValue(key, out value!))
                 {
                     Log.Information("StateMachine: Get Key='{Key}', Found Value='{Value}'", key, value);
                     // Return the found value

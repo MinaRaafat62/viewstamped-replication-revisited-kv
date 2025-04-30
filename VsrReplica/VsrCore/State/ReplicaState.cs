@@ -53,7 +53,7 @@ public class ReplicaState(byte replica, byte totalReplicas, IStateMachine stateM
     public LogEntry GetLogEntry(ulong opNumber)
     {
         _log.TryGetValue(opNumber, out var entry);
-        return entry;
+        return entry!;
     }
 
 

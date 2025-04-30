@@ -19,8 +19,6 @@ public class Replica : IDisposable
     private readonly ApplicationPipeline<VsrMessage> _applicationPipeline;
     private readonly ReplicaState _state;
     private readonly Dictionary<byte, IPEndPoint> _replicaMap;
-    private readonly IReplicaTimer _primaryMonitorTimer;
-    private readonly IReplicaTimer _primaryIdleCommitTimer;
     private readonly CancellationTokenSource _cts = new();
     private readonly ReplicaLifecycleManager _lifecycleManager;
     private readonly IReplicaContext _replicaContext;
@@ -83,12 +81,12 @@ public class Replica : IDisposable
         Action<InternalEventPipelineItem> enqueueAction = (pipelineMsg) =>
             _applicationPipeline.EnqueueInternalEventAsync(pipelineMsg.Type).AsTask().Wait();
 
-        _primaryMonitorTimer = new PrimaryMonitorTimer(_state.Replica, enqueueAction);
-        _primaryIdleCommitTimer = new PrimaryIdleCommitTimer(_state.Replica, enqueueAction);
+        IReplicaTimer primaryMonitorTimer = new PrimaryMonitorTimer(_state.Replica, enqueueAction);
+        IReplicaTimer primaryIdleCommitTimer = new PrimaryIdleCommitTimer(_state.Replica, enqueueAction);
         _lifecycleManager = new ReplicaLifecycleManager(
             _state,
-            _primaryMonitorTimer,
-            _primaryIdleCommitTimer,
+            primaryMonitorTimer,
+            primaryIdleCommitTimer,
             _replicaContext
         );
     }
@@ -229,7 +227,6 @@ public class Replica : IDisposable
         _lifecycleManager?.Dispose();
         _networkManager?.DisposeAsync().AsTask().Wait(TimeSpan.FromSeconds(5));
         _applicationPipeline?.DisposeAsync().AsTask().Wait(TimeSpan.FromSeconds(1));
-        GC.SuppressFinalize(this);
         _cts.Dispose();
         Log.Information("Replica {ReplicaId}: Disposal complete.", _state.Replica);
         GC.SuppressFinalize(this);

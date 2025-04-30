@@ -1,119 +1,80 @@
 using System.Buffers.Binary;
+using Serilog;
+using VsrReplica.VsrCore.Utils;
 
 namespace VsrReplica.VsrCore.Messages;
 
-public class VsrHeaderSerializer
+public static class VsrHeaderSerializer
 {
     public static void Serialize(VsrHeader header, Span<byte> destination)
     {
         if (destination.Length < 128)
             throw new ArgumentException("Destination buffer too small for header");
 
-        if (header.ChecksumBody == 0)
+        if (header.ChecksumBody == 0 || header.Checksum == 0)
         {
             throw new InvalidOperationException("ChecksumBody must be set");
         }
 
-        var position = 0;
+        var writer = new BinaryUtils.SpanWriter(destination);
+        writer.WriteUInt128BigEndian(header.Checksum);
+        writer.WriteUInt128BigEndian(header.ChecksumBody);
+        writer.WriteUInt128BigEndian(header.Parent);
+        writer.WriteUInt128BigEndian(header.Client);
+        writer.WriteUInt128BigEndian(header.Context);
+        writer.WriteUInt32BigEndian(header.Request);
+        writer.WriteUInt32BigEndian(header.Cluster);
+        writer.WriteUInt32BigEndian(header.Epoch);
+        writer.WriteUInt32BigEndian(header.View);
+        writer.WriteUInt64BigEndian(header.Op);
+        writer.WriteUInt64BigEndian(header.Commit);
+        writer.WriteUInt64BigEndian(header.Offset);
+        writer.WriteUInt32BigEndian(header.Size); // Size includes header + payload
+        writer.WriteByte(header.Replica);
+        writer.WriteByte((byte)header.Command);
+        writer.WriteByte((byte)header.Operation);
+        writer.WriteByte(header.Version);
 
-        // Write all fields in order
-        BinaryPrimitives.WriteUInt128BigEndian(destination.Slice(position, 16), header.Checksum);
-        position += 16;
-
-        BinaryPrimitives.WriteUInt128BigEndian(destination.Slice(position, 16), header.ChecksumBody);
-        position += 16;
-
-        BinaryPrimitives.WriteUInt128BigEndian(destination.Slice(position, 16), header.Parent);
-        position += 16;
-
-        BinaryPrimitives.WriteUInt128BigEndian(destination.Slice(position, 16), header.Client);
-        position += 16;
-
-        BinaryPrimitives.WriteUInt128BigEndian(destination.Slice(position, 16), header.Context);
-        position += 16;
-
-        BinaryPrimitives.WriteUInt32BigEndian(destination.Slice(position, 4), header.Request);
-        position += 4;
-
-        BinaryPrimitives.WriteUInt32BigEndian(destination.Slice(position, 4), header.Cluster);
-        position += 4;
-
-        BinaryPrimitives.WriteUInt32BigEndian(destination.Slice(position, 4), header.Epoch);
-        position += 4;
-
-        BinaryPrimitives.WriteUInt32BigEndian(destination.Slice(position, 4), header.View);
-        position += 4;
-
-        BinaryPrimitives.WriteUInt64BigEndian(destination.Slice(position, 8), header.Op);
-        position += 8;
-
-        BinaryPrimitives.WriteUInt64BigEndian(destination.Slice(position, 8), header.Commit);
-        position += 8;
-
-        BinaryPrimitives.WriteUInt64BigEndian(destination.Slice(position, 8), header.Offset);
-        position += 8;
-
-        BinaryPrimitives.WriteUInt32BigEndian(destination.Slice(position, 4), header.Size);
-        position += 4;
-
-        destination[position++] = header.Replica;
-        destination[position++] = (byte)header.Command;
-        destination[position++] = (byte)header.Operation;
-        destination[position] = header.Version;
+        // (sanity check) ensure that the number of bytes written is correct
+        if (writer.BytesWritten != GlobalConfig.HeaderSize)
+        {
+            Log.Error(
+                "VsrHeaderSerializer.Serialize: Incorrect number of bytes written. Expected {Expected}, wrote {Actual}",
+                GlobalConfig.HeaderSize, writer.BytesWritten);
+        }
     }
 
     public static VsrHeader Deserialize(ReadOnlySpan<byte> source)
     {
-        if (source.Length < 128)
+        if (source.Length < GlobalConfig.HeaderSize)
             throw new ArgumentException("Source buffer too small for header");
 
-        var position = 0;
-
-        var checksum = BinaryPrimitives.ReadUInt128BigEndian(source.Slice(position, 16));
-        position += 16;
-
-        var checksumBody = BinaryPrimitives.ReadUInt128BigEndian(source.Slice(position, 16));
-        position += 16;
-
-        var parent = BinaryPrimitives.ReadUInt128BigEndian(source.Slice(position, 16));
-        position += 16;
-
-        var client = BinaryPrimitives.ReadUInt128BigEndian(source.Slice(position, 16));
-        position += 16;
-
-        var context = BinaryPrimitives.ReadUInt128BigEndian(source.Slice(position, 16));
-        position += 16;
-
-        var request = BinaryPrimitives.ReadUInt32BigEndian(source.Slice(position, 4));
-        position += 4;
-
-        var cluster = BinaryPrimitives.ReadUInt32BigEndian(source.Slice(position, 4));
-        position += 4;
-
-        var epoch = BinaryPrimitives.ReadUInt32BigEndian(source.Slice(position, 4));
-        position += 4;
-
-        var view = BinaryPrimitives.ReadUInt32BigEndian(source.Slice(position, 4));
-        position += 4;
-
-        var op = BinaryPrimitives.ReadUInt64BigEndian(source.Slice(position, 8));
-        position += 8;
-
-        var commit = BinaryPrimitives.ReadUInt64BigEndian(source.Slice(position, 8));
-        position += 8;
-
-        var offset = BinaryPrimitives.ReadUInt64BigEndian(source.Slice(position, 8));
-        position += 8;
-
-        var sizeBytesSpan = source.Slice(position, 4);
-        var size = BinaryPrimitives.ReadUInt32BigEndian(sizeBytesSpan);
-        position += 4;
+        var reader = new BinaryUtils.SpanReader(source);
+        var checksum = reader.ReadUInt128BigEndian();
+        var checksumBody = reader.ReadUInt128BigEndian();
+        var parent = reader.ReadUInt128BigEndian();
+        var client = reader.ReadUInt128BigEndian();
+        var context = reader.ReadUInt128BigEndian();
+        var request = reader.ReadUInt32BigEndian();
+        var cluster = reader.ReadUInt32BigEndian();
+        var epoch = reader.ReadUInt32BigEndian();
+        var view = reader.ReadUInt32BigEndian();
+        var op = reader.ReadUInt64BigEndian();
+        var commit = reader.ReadUInt64BigEndian();
+        var offset = reader.ReadUInt64BigEndian();
+        var size = reader.ReadUInt32BigEndian(); // Size includes header + payload
+        var replica = reader.ReadByte();
+        var command = (Command)reader.ReadByte();
+        var operation = (Operation)reader.ReadByte();
+        var version = reader.ReadByte();
 
 
-        var replica = source[position++];
-        var command = (Command)source[position++];
-        var operation = (Operation)source[position++];
-        var version = source[position];
+        if (reader.BytesRead != GlobalConfig.HeaderSize)
+        {
+            Log.Error(
+                "VsrHeaderSerializer.Deserialize: Incorrect number of bytes read. Expected {Expected}, read {Actual}",
+                GlobalConfig.HeaderSize, reader.BytesRead);
+        }
 
         var header = new VsrHeader(
             parent, client, context, bodySize: size - GlobalConfig.HeaderSize, request, cluster, epoch, view, op,
