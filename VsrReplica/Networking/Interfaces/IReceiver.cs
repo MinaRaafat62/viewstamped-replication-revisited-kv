@@ -1,5 +1,3 @@
-using System.Net.Sockets;
-
 namespace VsrReplica.Networking.Interfaces;
 
 public interface IReceiver : IDisposable

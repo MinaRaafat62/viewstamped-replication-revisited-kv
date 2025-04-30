@@ -27,6 +27,7 @@ public class TcpNetworkManager<TMessage> : INetworkManager where TMessage : INet
     private readonly object _stopLock = new();
     private readonly ConcurrentDictionary<ConnectionId, ManagedTcpConnection<TMessage>> _activeConnections = new();
     private readonly ConcurrentDictionary<IPEndPoint, ConnectionId> _endpointToConnectionIdMap = new();
+    private readonly Dictionary<byte, IPEndPoint> _replicaIdToEndPointMap;
 
     private readonly int _maxConnectRetries;
     private readonly TimeSpan _initialConnectRetryDelay;
@@ -46,6 +47,7 @@ public class TcpNetworkManager<TMessage> : INetworkManager where TMessage : INet
         Func<ConnectionId, Exception, ValueTask> onProcessingError,
         Func<ConnectionId, IPEndPoint?, Exception?, ValueTask> onConnectionClosed,
         Func<IPEndPoint, Exception, ValueTask> onConnectionFailed,
+        Dictionary<byte, IPEndPoint> replicaIdToEndPointMap,
         int maxConnectRetries = 5,
         TimeSpan? initialConnectRetryDelay = null,
         TimeSpan? maxConnectRetryDelay = null,
@@ -67,6 +69,8 @@ public class TcpNetworkManager<TMessage> : INetworkManager where TMessage : INet
         _initialConnectRetryDelay = initialConnectRetryDelay ?? TimeSpan.FromSeconds(1);
         _maxConnectRetryDelay = maxConnectRetryDelay ?? TimeSpan.FromSeconds(15);
         _connectTimeout = connectTimeout ?? TimeSpan.FromSeconds(5);
+        _replicaIdToEndPointMap =
+            replicaIdToEndPointMap ?? throw new ArgumentNullException(nameof(replicaIdToEndPointMap));
 
         _tcpServer = new TcpServer(
             LocalEndPoint,
@@ -252,7 +256,6 @@ public class TcpNetworkManager<TMessage> : INetworkManager where TMessage : INet
             Socket? socket = null;
             Connection? lowLevelConnection = null;
             ManagedTcpConnection<TMessage>? managedConnection = null;
-            ConnectionId? connectionId = null;
 
             try
             {
@@ -268,7 +271,7 @@ public class TcpNetworkManager<TMessage> : INetworkManager where TMessage : INet
                     _applicationScheduler,
                     _memoryPool);
 
-                connectionId = new ConnectionId(Interlocked.Increment(ref _nextConnectionId));
+                ConnectionId? connectionId = new ConnectionId(Interlocked.Increment(ref _nextConnectionId));
 
                 managedConnection = new ManagedTcpConnection<TMessage>(
                     connectionId.Value,
@@ -622,11 +625,46 @@ public class TcpNetworkManager<TMessage> : INetworkManager where TMessage : INet
 
     async ValueTask INetworkManager.SendAsync(ConnectionId connectionId, ReadOnlyMemory<byte> data)
     {
-        await SendBytesAsync(connectionId, data, default).ConfigureAwait(false);
+        await SendBytesAsync(connectionId, data).ConfigureAwait(false);
     }
 
     async ValueTask INetworkManager.BroadcastAsync(IEnumerable<ConnectionId> connectionIds, ReadOnlyMemory<byte> data)
     {
-        await BroadcastBytesAsync(connectionIds, data, default).ConfigureAwait(false);
+        await BroadcastBytesAsync(connectionIds, data).ConfigureAwait(false);
+    }
+
+    public List<ConnectionId> GetOtherReplicasConnectionIds()
+    {
+        return _endpointToConnectionIdMap.Values.ToList();
+    }
+
+    public ConnectionId? GetConnectionIdForReplica(byte replicaId)
+    {
+        if (!_replicaIdToEndPointMap.TryGetValue(replicaId, out var endpoint))
+        {
+            Log.Warning("NetworkManager[{LocalEndPoint}]: No endpoint configured for Replica ID {ReplicaId}",
+                LocalEndPoint, replicaId);
+            return null;
+        }
+
+        if (_endpointToConnectionIdMap.TryGetValue(endpoint, out var connectionId))
+        {
+            if (_activeConnections.ContainsKey(connectionId))
+            {
+                return connectionId;
+            }
+
+            Log.Warning(
+                "NetworkManager[{LocalEndPoint}]: Found ConnectionId {ConnId} for Replica {ReplicaId} ({EndPoint}) but connection is not active. Removing stale map entry.",
+                LocalEndPoint, connectionId, replicaId, endpoint);
+            _endpointToConnectionIdMap.TryRemove(
+                new KeyValuePair<IPEndPoint, ConnectionId>(endpoint, connectionId));
+            return null;
+        }
+
+        Log.Debug(
+            "NetworkManager[{LocalEndPoint}]: No active connection found for Replica ID {ReplicaId} ({EndPoint})",
+            LocalEndPoint, replicaId, endpoint);
+        return null;
     }
 }

@@ -1,3 +1,3 @@
 namespace VsrReplica.Networking.Interfaces;
 
-public interface INetworkMessage;
+public interface INetworkMessage : IDisposable;

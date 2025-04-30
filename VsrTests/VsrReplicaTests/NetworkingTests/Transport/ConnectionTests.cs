@@ -1,6 +1,7 @@
 using System.Buffers;
 using System.Diagnostics;
 using System.IO.Pipelines;
+using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using Moq;
@@ -106,6 +107,8 @@ public class ConnectionTests : IAsyncLifetime
         // --- Default Strict Setups ---
         _mockSocket.Setup(s => s.Shutdown(SocketShutdown.Both));
         _mockSocket.Setup(s => s.Dispose());
+        _mockSocket.Setup(s => s.RemoteEndPoint)
+            .Returns(new IPEndPoint(IPAddress.Loopback, 12345)); // Mock remote endpoint
 
         _mockSenderPool.Setup(p => p.Rent()).Returns(_mockSender.Object);
         _mockSenderPool.Setup(p => p.Return(It.Is<ISender>(s => s == _mockSender.Object)));

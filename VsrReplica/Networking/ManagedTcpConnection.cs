@@ -1,5 +1,4 @@
 using System.Buffers;
-using System.IO.Pipelines;
 using Serilog;
 using VsrReplica.Networking.Interfaces;
 using VsrReplica.Networking.MemoryPool;
@@ -56,16 +55,16 @@ public class ManagedTcpConnection<TMessage> : IAsyncDisposable where TMessage : 
     private async Task ProcessMessagesAsync(CancellationToken cancellationToken)
     {
         Log.Debug("ManagedConnection[{ConnectionId}]: Starting message processing loop.", Id);
-        PipeReader reader = _connection.Input;
+        var reader = _connection.Input;
         Exception? error = null;
 
         try
         {
             while (!cancellationToken.IsCancellationRequested && !_connection.IsClosed)
             {
-                ReadResult result = await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
-                ReadOnlySequence<byte> buffer = result.Buffer;
-                SequencePosition consumed = buffer.Start;
+                var result = await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
+                var buffer = result.Buffer;
+                var consumed = buffer.Start;
 
                 if (result.IsCanceled)
                 {
@@ -75,17 +74,18 @@ public class ManagedTcpConnection<TMessage> : IAsyncDisposable where TMessage : 
 
                 try
                 {
+                    Log.Verbose("ManagedConnection[{ConnectionId}]: Processing read result.", Id);
                     while (TryParseMessage(ref buffer, out ParsedMessageResult? parsedResult))
                     {
                         if (parsedResult == null) continue;
 
-                        TMessage message = parsedResult.Value.Message;
-                        IMemoryOwner<byte> owner = parsedResult.Value.Owner;
+                        var message = parsedResult.Value.Message;
+                        var owner = parsedResult.Value.Owner;
 
                         Log.Verbose("ManagedConnection[{ConnectionId}]: Received message.", Id);
                         try
                         {
-                            await _onMessageReceived(Id, message).ConfigureAwait(false);
+                            await _onMessageReceived(Id, message);
                         }
                         catch (Exception callbackEx)
                         {
@@ -104,6 +104,7 @@ public class ManagedTcpConnection<TMessage> : IAsyncDisposable where TMessage : 
                         finally
                         {
                             owner.Dispose();
+                            message.Dispose();
                         }
 
                         consumed = buffer.Start;
@@ -174,7 +175,7 @@ public class ManagedTcpConnection<TMessage> : IAsyncDisposable where TMessage : 
             await DisposeAsyncInternal(error).ConfigureAwait(false);
         }
     }
-    
+
     private bool TryParseMessage(ref ReadOnlySequence<byte> buffer, out ParsedMessageResult? result)
     {
         result = null;
@@ -239,6 +240,7 @@ public class ManagedTcpConnection<TMessage> : IAsyncDisposable where TMessage : 
         {
             throw new InvalidOperationException($"Cannot send message on a closed connection (ID: {Id}).");
         }
+
         using var serializedMessage = _serializer.Serialize(message, _memoryPool);
 
         if (serializedMessage.Memory.IsEmpty)
@@ -268,6 +270,7 @@ public class ManagedTcpConnection<TMessage> : IAsyncDisposable where TMessage : 
             {
                 await DisposeAsyncInternal(ex).ConfigureAwait(false);
             }
+
             throw;
         }
     }

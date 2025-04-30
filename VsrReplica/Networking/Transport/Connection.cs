@@ -70,12 +70,19 @@ public class Connection : IAsyncDisposable
         {
             while (true)
             {
+                Log.Verbose("Connection[{Id}]: SendLoop waiting to read from transport pipe...", Id);
                 var result = await _transportPipe.Reader.ReadAsync();
                 var buff = result.Buffer;
+                Log.Verbose(
+                    "Connection[{Id}]: SendLoop read {Length} bytes from pipe. IsCompleted={IsCompleted}, IsCanceled={IsCanceled}",
+                    Id, buff.Length, result.IsCompleted, result.IsCanceled);
                 if (!buff.IsEmpty)
                 {
                     _sender = _senderPool.Rent();
+                    Log.Verbose("Connection[{Id}]: SendLoop attempting to send {Length} bytes via socket.", Id,
+                        buff.Length);
                     await _sender.SendAsync(_socket, result.Buffer);
+                    Log.Verbose("Connection[{Id}]: SendLoop successfully sent {Length} bytes.", Id, buff.Length);
                     _senderPool.Return(_sender);
                     _sender = null;
                 }
