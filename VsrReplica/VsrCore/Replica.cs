@@ -115,7 +115,7 @@ public class Replica : IDisposable
                     }
                     case PipelineMessageType.PrimaryTimeout:
                     {
-                        //await _lifecycleManager.HandlePrimaryTimeout();
+                        await _lifecycleManager.HandlePrimaryTimeout();
                         statePotentiallyChanged = true;
                         break;
                     }

@@ -37,10 +37,12 @@ public class VsrMessageSerializer : INetworkMessageSerializer<VsrMessage>
             throw new ArgumentException("Data too small for a valid message");
         }
 
+        Log.Verbose("Serializer: Received Data Hex: {DataHex}", Convert.ToHexString(data.Span));
         VsrHeader header;
         try
         {
             header = VsrHeaderSerializer.Deserialize(data.Span[..GlobalConfig.HeaderSize]);
+            Log.Verbose("Serializer: Deserialized Header Body Checksum: {Checksum}", header.ChecksumBody);
         }
         catch (Exception ex)
         {
@@ -48,10 +50,12 @@ public class VsrMessageSerializer : INetworkMessageSerializer<VsrMessage>
             Log.Error(ex, "Failed to deserialize VSR header.");
             throw new InvalidDataException("Failed to deserialize VSR header.", ex);
         }
-        
+
         var payloadSlice = data[GlobalConfig.HeaderSize..];
+        Log.Verbose("Serializer: Payload Slice Hex (Receiver): {PayloadHex}", Convert.ToHexString(payloadSlice.Span));
         var calculatedBodyChecksum = VsrHeader.CalculateBodyChecksum(payloadSlice.Span);
-        
+        Log.Verbose("Serializer: Recalculated Body Checksum (Receiver): {Checksum}", calculatedBodyChecksum);
+
         if (header.ChecksumBody != calculatedBodyChecksum)
         {
             Log.Error(
@@ -94,6 +98,7 @@ public class VsrMessageSerializer : INetworkMessageSerializer<VsrMessage>
     public static SerializedMessage SerializeMessage(VsrMessage message, MemoryPool<byte> pool)
     {
         message.Header.SetBodyChecksum(message.Payload.Span);
+        Log.Verbose("Serializer: Calculated Body Checksum (Sender): {Checksum}", message.Header.ChecksumBody);
         message.Header.SetHeaderChecksum();
         var size = GlobalConfig.HeaderSize + message.Payload.Length;
         var owner = pool.Rent(size);
@@ -108,7 +113,19 @@ public class VsrMessageSerializer : INetworkMessageSerializer<VsrMessage>
         var targetSpan = buffer.Span[..size];
 
         VsrHeaderSerializer.Serialize(message.Header, targetSpan[..GlobalConfig.HeaderSize]);
-        message.Payload.Span.CopyTo(targetSpan[GlobalConfig.HeaderSize..]);
+        ReadOnlySpan<byte> sourcePayloadSpan = message.Payload.Span;
+
+        var destinationPayloadSpan = targetSpan[GlobalConfig.HeaderSize..];
+        Log.Verbose(
+            "Serializer: Copying Payload. Source ({SourceLen} bytes): {SourceHex}, Dest Slice Start Index: {DestIndex}",
+            sourcePayloadSpan.Length, Convert.ToHexString(sourcePayloadSpan), GlobalConfig.HeaderSize);
+
+        sourcePayloadSpan.CopyTo(destinationPayloadSpan);
+
+        Log.Verbose("Serializer: Copied Payload. Resulting Dest Slice ({DestLen} bytes): {DestHex}",
+            destinationPayloadSpan.Length, Convert.ToHexString(destinationPayloadSpan));
+        Log.Verbose("Serializer: Full buffer after copy ({FullLen} bytes): {FullHex}",
+            targetSpan.Length, Convert.ToHexString(targetSpan));
 
         return new SerializedMessage(buffer[..size], owner);
     }

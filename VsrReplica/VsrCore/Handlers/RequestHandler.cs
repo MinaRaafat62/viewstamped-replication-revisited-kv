@@ -73,7 +73,7 @@ public class RequestHandler : IVsrCommandHandler
         using var serializedPrepareMessage =
             VsrMessageSerializer.SerializeMessage(prepareMessage, state.MemoryPool);
         await context.BroadcastAsync(serializedPrepareMessage).ConfigureAwait(false);
-        var prepareOkCount = state.AddPrepareOk(opNumber, state.Replica);
+        var prepareOkCount = state.AddPrepareOk(opNumber, state.Replica); // Add self to prepareOk
         if (prepareOkCount < state.QuorumSize) return true;
         Log.Information(
             "Replica {ReplicaId} (Primary): Op={OpNumber} reached quorum ({Count}/{Needed}) immediately after PREPARE.",

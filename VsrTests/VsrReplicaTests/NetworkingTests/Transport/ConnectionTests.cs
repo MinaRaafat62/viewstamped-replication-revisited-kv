@@ -174,7 +174,7 @@ public class ConnectionTests : IAsyncLifetime
         Assert.False(_connection.IsClosed);
     }
 
-    [Fact]
+    [Fact] // Flaky test: sometimes fails due to timing issues
     public async Task Start_LoopsComplete_WhenReceiverClosesAndOutputCompletes()
     {
         // Arrange: Receiver mock already set up in InitializeAsync to return 0 (close)
@@ -203,12 +203,12 @@ public class ConnectionTests : IAsyncLifetime
         var dataToReceive = Encoding.UTF8.GetBytes("Hello Receiver");
 
         // Setup receiver mock with state to simulate sequence
-        int receiveCallCount = 0; // State variable for the mock
+        var receiveCallCount = 0; // State variable for the mock
         _mockReceiver.Setup(r => r.ReceiveAsync(_mockSocket.Object, It.IsAny<Memory<byte>>()))
             // Make the lambda async to allow awaits inside
             .Returns<ISocket, Memory<byte>>(async (socket, buffer) =>
             {
-                int callNum = Interlocked.Increment(ref receiveCallCount); // Track calls
+                var callNum = Interlocked.Increment(ref receiveCallCount); // Track calls
                 if (callNum == 1)
                 {
                     // First call: copy data to the buffer's Span

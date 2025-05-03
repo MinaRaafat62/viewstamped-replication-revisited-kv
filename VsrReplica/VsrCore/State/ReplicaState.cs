@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Collections.Concurrent;
 using Serilog;
 using VsrReplica.Networking;
 using VsrReplica.VsrCore.Application;
@@ -19,7 +20,7 @@ public class ReplicaState(byte replica, byte totalReplicas, IStateMachine stateM
 
     public uint View { get; private set; } = 0;
     public ReplicaStatus Status { get; private set; } = ReplicaStatus.Normal;
-    public uint StatusViewNumber { get; private set; }
+
     public ulong Op { get; set; } = 0;
     public ulong Commit { get; set; } = 0;
     public uint Epoch { get; set; } = 0;
@@ -29,18 +30,192 @@ public class ReplicaState(byte replica, byte totalReplicas, IStateMachine stateM
     private readonly Dictionary<ulong, LogEntry> _log = new();
     private readonly Dictionary<ulong, ConnectionId> _pendingClientConnections = new();
     private readonly Dictionary<ulong, HashSet<byte>> _prepareOkCounts = new();
-    private readonly Dictionary<ConnectionId, UInt128> _connectionsToClients = new();
+    private readonly Dictionary<UInt128, ConnectionId> _clientToConnectionMap = new();
+
+    public uint LastNormalView { get; private set; }
+    public uint StatusViewNumber { get; private set; }
+
+    private readonly Dictionary<uint, HashSet<byte>> _startViewChangeVotes = new();
+    private readonly Dictionary<uint, List<DoViewChangeReceivedData>> _doViewChangeData = new();
+
+    public record DoViewChangeReceivedData(
+        byte SenderId,
+        uint OldView, // The 'v' in the paper's DVC message (sender's view when it sent SVC)
+        ulong Op,
+        ulong Commit,
+        List<LogEntry> LogSuffix // The log suffix sent by the sender
+    );
+
+    public void InitiateViewChange()
+    {
+        if (Status == ReplicaStatus.Normal)
+        {
+            LastNormalView = View;
+        }
+
+        var nextView = (Status == ReplicaStatus.ViewChange ? StatusViewNumber : View) + 1;
+        Log.Warning(
+            "Replica {ReplicaId}: Initiating View Change. Current View: {CurrentView}, Current Status: {Status}. Moving to View: {NextView}",
+            Replica, View, Status, nextView);
+        View = nextView;
+        Status = ReplicaStatus.ViewChange;
+        StatusViewNumber = nextView;
+        _startViewChangeVotes.Remove(StatusViewNumber);
+        _doViewChangeData.Remove(StatusViewNumber);
+    }
+
+    public bool AddStartViewChangeVote(uint view, byte replicaId)
+    {
+        if (!_startViewChangeVotes.TryGetValue(view, out var votes))
+        {
+            votes = [];
+            _startViewChangeVotes[view] = votes;
+        }
+
+        var added = votes.Add(replicaId);
+        Log.Debug(
+            "Replica {ReplicaId}: Received StartViewChange vote for View {View} from Replica {SenderId}. Added={Added}. Total Votes: {Count}/{Needed}",
+            Replica, view, replicaId, added, votes.Count, QuorumSize);
+        return votes.Count >= QuorumSize; // Quorum for StartViewChange is f+1
+    }
+
+
+    public bool AddDoViewChangeData(uint view, DoViewChangeReceivedData data)
+    {
+        if (!_doViewChangeData.TryGetValue(view, out var dataList))
+        {
+            dataList = [];
+            _doViewChangeData[view] = dataList;
+        }
+
+        if (dataList.Any(d => d.SenderId == data.SenderId))
+        {
+            Log.Warning(
+                "Replica {ReplicaId}: Received duplicate DoViewChange for View {View} from Replica {SenderId}. Ignoring.",
+                Replica, view, data.SenderId);
+            return dataList.Count >= QuorumSize; // Return current status
+        }
+
+        dataList.Add(data);
+        Log.Debug(
+            "Replica {ReplicaId}: Received DoViewChange data for View {View} from Replica {SenderId}. Total Received: {Count}/{Needed}",
+            Replica, view, data.SenderId, dataList.Count,
+            QuorumSize);
+        return dataList.Count >= QuorumSize;
+    }
+
+    public List<DoViewChangeReceivedData>? GetDoViewChangeQuorumData(uint view)
+    {
+        if (_doViewChangeData.TryGetValue(view, out var dataList) && dataList.Count >= QuorumSize)
+        {
+            return dataList;
+        }
+
+        return null;
+    }
+
+
+    public List<LogEntry> GetLogSuffix(ulong fromCommitNumber)
+    {
+        // Return entries with Op > fromCommitNumber, ordered by Op
+        return _log.Where(kv => kv.Key > fromCommitNumber)
+            .OrderBy(kv => kv.Key)
+            .Select(kv => kv.Value)
+            .ToList();
+    }
+
+
+    public void ReplaceLogSuffix(ulong startingOp, List<LogEntry> suffix)
+    {
+        Log.Information(
+            "Replica {ReplicaId}: Replacing log suffix starting from Op={StartOp}. New suffix contains {Count} entries.",
+            Replica, startingOp, suffix.Count);
+
+        var opsToRemove = _log.Keys.Where(op => op >= startingOp).ToList();
+        foreach (var op in opsToRemove)
+        {
+            if (_log.Remove(op, out var removedEntry))
+            {
+                Log.Debug("Replica {ReplicaId}: Removed existing log entry {Op} during suffix replacement.", Replica,
+                    op);
+                // Potentially dispose resources if LogEntry held any unmanaged ones, though unlikely here.
+            }
+        }
+
+        _prepareOkCounts.Clear();
+
+        ulong maxOpInSuffix = Op;
+        foreach (var entry in suffix)
+        {
+            if (entry.Op < startingOp)
+            {
+                Log.Warning(
+                    "Replica {ReplicaId}: Log suffix contains entry {Op} which is before startingOp {StartOp}. Skipping.",
+                    Replica, entry.Op, startingOp);
+                continue;
+            }
+
+            _log[entry.Op] = entry;
+            Log.Debug("Replica {ReplicaId}: Added log entry {Op} from suffix.", Replica, entry.Op);
+            if (entry.Op > maxOpInSuffix)
+            {
+                maxOpInSuffix = entry.Op;
+            }
+        }
+
+        Op = maxOpInSuffix;
+        Log.Information("Replica {ReplicaId}: Log suffix replaced. New Op number: {NewOp}", Replica, Op);
+    }
+
+    public void SetStatusNormal(uint newView, ulong newOp, ulong newCommit)
+    {
+        var previousView = View;
+        Log.Information("Replica {ReplicaId}: Transitioning to Normal status. View: {View}, Op: {Op}, Commit: {Commit}",
+            Replica, newView, newOp, newCommit);
+
+        View = newView;
+        Op = newOp;
+        Commit = newCommit;
+        Status = ReplicaStatus.Normal;
+        LastNormalView = newView;
+        var oldStatusViewNumber = StatusViewNumber;
+        StatusViewNumber = 0;
+        if (oldStatusViewNumber > 0) ClearViewChangeState(oldStatusViewNumber);
+        if (previousView > 0 && previousView != newView) ClearViewChangeState(previousView);
+    }
+
+    public void ClearViewChangeState(uint view)
+    {
+        var removedSvc = _startViewChangeVotes.Remove(view);
+        var removedDvc = _doViewChangeData.Remove(view);
+        if (removedSvc || removedDvc)
+        {
+            Log.Debug(
+                "Replica {ReplicaId}: Cleared view change tracking state for View {View}. SVC Removed: {RemovedSvc}, DVC Removed: {RemovedDvc}",
+                Replica, view, removedSvc, removedDvc);
+        }
+    }
 
 
     public void AddConnectionToClient(ConnectionId connectionId, UInt128 clientId)
     {
-        _connectionsToClients.TryAdd(connectionId, clientId);
+        _clientToConnectionMap.TryAdd(clientId, connectionId);
     }
 
-    public UInt128 GetClientId(ConnectionId connectionId)
+    public ConnectionId GetClientConnectionId(UInt128 clientId)
     {
-        _connectionsToClients.TryGetValue(connectionId, out var clientId);
-        return clientId;
+        _clientToConnectionMap.TryGetValue(clientId, out var connectionId);
+        return connectionId;
+    }
+
+    public int GetStartViewChangeVoteCount(uint view)
+    {
+        if (_startViewChangeVotes.TryGetValue(view, out var votes))
+        {
+            return votes.Count;
+        }
+
+        return 0; // No votes recorded for this view yet
     }
 
 

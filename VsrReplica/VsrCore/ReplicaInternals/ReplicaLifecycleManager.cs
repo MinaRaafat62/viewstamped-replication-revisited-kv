@@ -98,56 +98,51 @@ public class ReplicaLifecycleManager : IDisposable
         }
     }
 
-    public Task HandlePrimaryTimeout()
+    public async Task HandlePrimaryTimeout()
     {
-        // Log.Warning("Replica {ReplicaId}: Handling PrimaryTimeout event. Current View: {View}, Status: {Status}",
-        //     _state.Replica, _state.View, _state.Status);
-        //
-        // // Ignore timeout if we are the primary, already in view change, or recovering
-        // if (_state.IsPrimary || _state.Status != ReplicaStatus.Normal)
-        // {
-        //     Log.Information(
-        //         "Replica {ReplicaId}: Ignoring PrimaryTimeout event (IsPrimary={IsPrimary}, Status={Status}).",
-        //         _state.Replica, _state.IsPrimary, _state.Status);
-        //     return;
-        // }
-        //
-        // // --- Initiate View Change ---
-        // _state.InitiateViewChange(); // Advances view, sets status to ViewChange
-        //
-        // // Stop timers explicitly after initiating change (UpdateTimerStates will be called later)
-        // _primaryMonitorTimer.Stop();
-        // _primaryIdleCommitTimer.Stop();
-        //
-        // // Broadcast StartViewChange message
-        // var nextView = _state.View; 
-        // var startViewChangeHeader = new VsrHeader(
-        //     parent: 0, client: 0, context: BinaryUtils.NewGuidUInt128(),
-        //     bodySize: 0, request: 0, cluster: _state.Cluster, epoch: _state.Epoch,
-        //     view: nextView, // Use the new view number
-        //     op: _state.Op, commit: _state.Commit, offset: 0,
-        //     replica: _state.Replica, // Sender is this replica
-        //     command: Command.StartViewChange,
-        //     operation: Operation.Reserved, version: GlobalConfig.CurrentVersion
-        // );
-        // var startViewChangeMessage = new VsrMessage(startViewChangeHeader, Memory<byte>.Empty);
-        //
-        // Log.Information("Replica {ReplicaId}: Broadcasting StartViewChange for View {View} due to timeout.",
-        //     _state.Replica, nextView);
-        //
-        // using var serializedMsg = VsrMessageSerializer.SerializeMessage(startViewChangeMessage, _state.MemoryPool);
-        // try
-        // {
-        //     // Use context to broadcast
-        //     await _replicaContext.BroadcastAsync(serializedMsg).ConfigureAwait(false);
-        // }
-        // catch (Exception ex)
-        // {
-        //     Log.Error(ex, "Replica {ReplicaId}: Failed to broadcast StartViewChange for View {View}.", _state.Replica,
-        //         nextView);
-        // }
-        // // Note: UpdateTimerStates will be called after this handler finishes in the main loop.
-        return Task.CompletedTask;
+        Log.Warning("Replica {ReplicaId}: Handling PrimaryTimeout event. Current View: {View}, Status: {Status}",
+            _state.Replica, _state.View, _state.Status);
+        
+        if (_state.IsPrimary || _state.Status == ReplicaStatus.Recovering)
+        {
+            Log.Information(
+                "Replica {ReplicaId}: Ignoring PrimaryTimeout event (IsPrimary={IsPrimary}, Status={Status}).",
+                _state.Replica, _state.IsPrimary, _state.Status);
+            return;
+        }
+        _state.InitiateViewChange();
+        _state.AddStartViewChangeVote(_state.StatusViewNumber, _state.Replica);
+        
+        var nextView = _state.StatusViewNumber;
+        var startViewChangeHeader = new VsrHeader(
+            parent: 0, client: 0, context: BinaryUtils.NewGuidUInt128(),
+            bodySize: 0, request: 0, cluster: _state.Cluster, epoch: _state.Epoch,
+            view: nextView, 
+            op: _state.Op, 
+            commit: _state.Commit,
+            offset: 0,
+            replica: _state.Replica,
+            command: Command.StartViewChange,
+            operation: Operation.Reserved, version: GlobalConfig.CurrentVersion
+        );
+        var startViewChangeMessage = new VsrMessage(startViewChangeHeader, Memory<byte>.Empty);
+
+        Log.Information("Replica {ReplicaId}: Broadcasting StartViewChange for View {View} due to timeout.",
+            _state.Replica, nextView);
+        var serializedMsg = VsrMessageSerializer.SerializeMessage(startViewChangeMessage, _state.MemoryPool);
+        try
+        {
+            await _replicaContext.BroadcastAsync(serializedMsg).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "Replica {ReplicaId}: Failed to broadcast StartViewChange for View {View}.", _state.Replica,
+                nextView);
+        }
+        finally
+        {
+            serializedMsg.Dispose();
+        }
     }
 
 

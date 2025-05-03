@@ -114,13 +114,18 @@ public class Connection : IAsyncDisposable
         {
             while (true)
             {
+                Log.Verbose("Connection[{Id}]: ReceiveLoop - Awaiting GetMemory...", Id);
                 var buff = _applicationPipe.Writer.GetMemory(MinBuffSize);
+                Log.Verbose("Connection[{Id}]: ReceiveLoop - Awaiting ReceiveAsync...", Id);
                 var bytes = await _receiver.ReceiveAsync(_socket, buff);
+                Log.Verbose("Connection[{Id}]: ReceiveAsync returned {Bytes} bytes.", Id, bytes); 
                 if (bytes == 0)
                 {
                     break;
                 }
 
+                Log.Verbose("Connection[{Id}]: Received raw {Count} bytes: {HexData}", Id, bytes,
+                    Convert.ToHexString(buff[..bytes].Span));
                 _applicationPipe.Writer.Advance(bytes);
                 var result = await _applicationPipe.Writer.FlushAsync();
                 if (result.IsCanceled || result.IsCompleted)

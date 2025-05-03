@@ -62,8 +62,11 @@ public class ManagedTcpConnection<TMessage> : IAsyncDisposable where TMessage : 
         {
             while (!cancellationToken.IsCancellationRequested && !_connection.IsClosed)
             {
+                Log.Verbose("ManagedConnection[{ConnectionId}]: Loop top. Waiting for ReadAsync...", Id);
                 var result = await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
+                Log.Verbose("ManagedConnection[{ConnectionId}]: ReadAsync completed. IsCanceled={IsCanceled}, IsCompleted={IsCompleted}", Id, result.IsCanceled, result.IsCompleted);
                 var buffer = result.Buffer;
+                Log.Verbose("ManagedConnection[{ConnectionId}]: Buffer length: {Length}", Id, buffer.Length);
                 var consumed = buffer.Start;
 
                 if (result.IsCanceled)

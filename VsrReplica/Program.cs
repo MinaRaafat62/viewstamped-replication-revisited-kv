@@ -15,8 +15,8 @@ public class Program
             .Enrich.FromLogContext()
             .Enrich.WithExceptionDetails()
             .WriteTo.Console(outputTemplate:
-                "[{Timestamp:HH:mm:ss.fff} {Level:u3}] {Message:lj}{NewLine}{Exception}") // Example template
-            .MinimumLevel.Information() // Adjust level as needed (Verbose for network details)
+                "[{Timestamp:HH:mm:ss.fff} {Level:u3}] {Message:lj}{NewLine}{Exception}")
+            .MinimumLevel.Verbose() 
             .CreateLogger();
     }
 

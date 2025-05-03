@@ -29,9 +29,9 @@ public class ReplicaHandlers
         RegisterHandler(Command.Commit, new CommitHandler());
         RegisterHandler(Command.Prepare, new PrepareHandler());
         RegisterHandler(Command.PrepareOk, new PrepareOkHandler());
-        // RegisterHandler(Command.StartViewChange, new StartViewChangeHandler());
-        // RegisterHandler(Command.DoViewChange, new DoViewChangeHandler());
-        // RegisterHandler(Command.StartView, new StartViewHandler());
+        RegisterHandler(Command.StartViewChange, new StartViewChangeHandler());
+        RegisterHandler(Command.DoViewChange, new DoViewChangeHandler());
+        RegisterHandler(Command.StartView, new StartViewHandler());
         // RegisterHandler(Command.Recovery, new RecoveryHandler());
         // RegisterHandler(Command.RecoveryResponse, new RecoveryResponseHandler());
         // Add more handlers for other commands
