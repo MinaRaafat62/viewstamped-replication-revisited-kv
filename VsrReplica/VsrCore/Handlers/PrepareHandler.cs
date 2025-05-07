@@ -61,12 +61,11 @@ public class PrepareHandler : IVsrCommandHandler
 
         if (opNumber > state.Op + 1)
         {
-            // Log hole detected!
             Log.Warning(
                 "Replica {ReplicaId}: Received PREPARE for Op={OpNumber} but expected Op={ExpectedOp}. Log hole detected! State transfer needed.",
                 state.Replica, opNumber, state.Op + 1);
-            // TODO: Initiate state transfer / recovery mechanism
-            return false; // Cannot process this PREPARE yet
+            await context.InitiateRecoveryAsync();
+            return false; 
         }
 
         var appendedOpNumber = state.AppendLogEntry(header.Operation, message.Payload, header);

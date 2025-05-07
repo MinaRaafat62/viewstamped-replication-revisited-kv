@@ -185,6 +185,13 @@ public class DoViewChangeHandler : IVsrCommandHandler
         for (var op = previousCommit + 1; op <= currentCommit; op++)
         {
             var logEntry = state.GetLogEntry(op);
+            if (logEntry == null) // Add null check
+            {
+                Log.Error(
+                    "Replica {ReplicaId} (Primary): Log entry missing for Op={OpNumber} during commit sequence. Stopping.",
+                    state.Replica, op);
+                break;
+            }
 
             var clientEntry = state.GetClientTableEntry(logEntry.Client);
             var alreadyExecuted =

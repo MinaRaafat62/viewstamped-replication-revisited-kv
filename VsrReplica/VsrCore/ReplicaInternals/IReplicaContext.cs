@@ -11,4 +11,5 @@ public interface IReplicaContext
     public Task BroadcastAsync(SerializedMessage message);
     public Task EnqueueInternalMessageAsync(PipelineMessageType type);
     public ConnectionId? GetConnectionIdForReplica(byte replicaId);
+    public Task InitiateRecoveryAsync();
 }

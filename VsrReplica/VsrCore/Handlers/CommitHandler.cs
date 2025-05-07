@@ -66,11 +66,28 @@ public class CommitHandler : IVsrCommandHandler
     private async Task CommitOperationsAsync(ulong targetCommitNumber, IReplicaContext context)
     {
         var state = context.State;
-        ulong opToCommit = state.Commit + 1;
+        var opToCommit = state.Commit + 1;
 
         while (opToCommit <= targetCommitNumber)
         {
             var logEntry = state.GetLogEntry(opToCommit);
+            if (logEntry == null)
+            {
+                if (opToCommit <= state.Op)
+                {
+                    Log.Error(
+                        "Replica {ReplicaId}: Log entry missing for Op={OpNumber} (State.Op={CurrentOp}) which should be present! Initiating recovery.",
+                        state.Replica, opToCommit, state.Op);
+                    await context.InitiateRecoveryAsync();
+                    return;
+                }
+
+                Log.Warning(
+                    "Replica {ReplicaId}: Received commit instruction for future Op={OpNumber} but log entry not found (State.Op={CurrentOp}). Waiting for PREPARE.",
+                    state.Replica, opToCommit, state.Op);
+                break;
+            }
+
             var result = state.ExecuteAndCommitOperation(opToCommit);
             if (result == null)
             {

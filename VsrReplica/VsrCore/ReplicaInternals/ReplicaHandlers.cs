@@ -23,7 +23,6 @@ public class ReplicaHandlers
 
     public static void RegisterCommandHandlers()
     {
-        // Register all command handlers here
         RegisterHandler(Command.Ping, new PingHandler());
         RegisterHandler(Command.Request, new RequestHandler());
         RegisterHandler(Command.Commit, new CommitHandler());
@@ -32,8 +31,7 @@ public class ReplicaHandlers
         RegisterHandler(Command.StartViewChange, new StartViewChangeHandler());
         RegisterHandler(Command.DoViewChange, new DoViewChangeHandler());
         RegisterHandler(Command.StartView, new StartViewHandler());
-        // RegisterHandler(Command.Recovery, new RecoveryHandler());
-        // RegisterHandler(Command.RecoveryResponse, new RecoveryResponseHandler());
-        // Add more handlers for other commands
+        RegisterHandler(Command.Recovery, new RecoveryHandler());
+        RegisterHandler(Command.RecoveryResponse, new RecoveryResponseHandler());
     }
 }

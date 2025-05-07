@@ -27,7 +27,7 @@ public class StartViewHandler : IVsrCommandHandler
             return false;
         }
 
-        byte expectedPrimary = (byte)(receivedView % state.TotalReplicas);
+        var expectedPrimary = (byte)(receivedView % state.TotalReplicas);
         if (primaryId != expectedPrimary)
         {
             Log.Warning(
@@ -145,6 +145,14 @@ public class StartViewHandler : IVsrCommandHandler
         for (var op = state.Commit + 1; op <= state.Op; op++)
         {
             var entry = state.GetLogEntry(op);
+            if (entry == null)
+            {
+                Log.Error(
+                    "Replica {ReplicaId}: CRITICAL - Log entry missing for Op {OpNumber} during post-StartView execution! State is inconsistent.",
+                    state.Replica, op);
+                break;
+            }
+
             var prepareOkHeader = new VsrHeader(
                 parent: 0, client: 0, context: 0, // Context not specified for this PrepareOk
                 bodySize: 0, request: 0, cluster: state.Cluster, epoch: state.Epoch,
@@ -205,7 +213,13 @@ public class StartViewHandler : IVsrCommandHandler
         for (var op = previousCommit + 1; op <= currentCommit; op++)
         {
             var logEntry = state.GetLogEntry(op);
-
+            if (logEntry == null) // Add null check
+            {
+                Log.Error(
+                    "Replica {ReplicaId} (Primary): Log entry missing for Op={OpNumber} during commit sequence. Stopping.",
+                    state.Replica, op);
+                break;
+            }
             var clientEntry = state.GetClientTableEntry(logEntry.Client);
             var alreadyExecuted =
                 clientEntry != null && clientEntry.Request == logEntry.Request && clientEntry.Executed;

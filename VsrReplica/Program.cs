@@ -13,10 +13,11 @@ public class Program
     {
         Log.Logger = new LoggerConfiguration()
             .Enrich.FromLogContext()
+            .Enrich.WithThreadId()
             .Enrich.WithExceptionDetails()
-            .WriteTo.Console(outputTemplate:
-                "[{Timestamp:HH:mm:ss.fff} {Level:u3}] {Message:lj}{NewLine}{Exception}")
-            .MinimumLevel.Verbose() 
+            .WriteTo.Console(
+                outputTemplate: "[{Timestamp:HH:mm:ss.fff} thr:{ThreadId} {Level:u3}] {Message:lj}{NewLine}{Exception}")
+            .MinimumLevel.Debug()
             .CreateLogger();
     }
 

@@ -18,7 +18,7 @@ public class ReplicaState(byte replica, byte totalReplicas, IStateMachine stateM
     public int QuorumSize => F + 1;
     private int F => (TotalReplicas - 1) / 2;
 
-    public uint View { get; private set; } = 0;
+    public uint View { get; private set; }
     public ReplicaStatus Status { get; private set; } = ReplicaStatus.Normal;
 
     public ulong Op { get; set; } = 0;
@@ -38,6 +38,10 @@ public class ReplicaState(byte replica, byte totalReplicas, IStateMachine stateM
     private readonly Dictionary<uint, HashSet<byte>> _startViewChangeVotes = new();
     private readonly Dictionary<uint, List<DoViewChangeReceivedData>> _doViewChangeData = new();
 
+    public UInt128? CurrentRecoveryNonce { get; private set; }
+    private readonly Dictionary<uint, List<RecoveryResponseData>> _recoveryResponses = new();
+    private uint _highestRecoveryViewSeen;
+
     public record DoViewChangeReceivedData(
         byte SenderId,
         uint OldView, // The 'v' in the paper's DVC message (sender's view when it sent SVC)
@@ -45,6 +49,17 @@ public class ReplicaState(byte replica, byte totalReplicas, IStateMachine stateM
         ulong Commit,
         List<LogEntry> LogSuffix // The log suffix sent by the sender
     );
+
+    public record RecoveryResponseData(
+        byte SenderId,
+        UInt128 Nonce,
+        uint View,
+        ulong Op,
+        ulong Commit,
+        bool IsPrimary,
+        List<LogEntry> Logs
+    );
+
 
     public void InitiateViewChange()
     {
@@ -101,7 +116,7 @@ public class ReplicaState(byte replica, byte totalReplicas, IStateMachine stateM
             "Replica {ReplicaId}: Received DoViewChange data for View {View} from Replica {SenderId}. Total Received: {Count}/{Needed}",
             Replica, view, data.SenderId, dataList.Count,
             QuorumSize);
-        return dataList.Count >= QuorumSize;
+        return dataList.Count >= F;
     }
 
     public List<DoViewChangeReceivedData>? GetDoViewChangeQuorumData(uint view)
@@ -132,19 +147,16 @@ public class ReplicaState(byte replica, byte totalReplicas, IStateMachine stateM
             Replica, startingOp, suffix.Count);
 
         var opsToRemove = _log.Keys.Where(op => op >= startingOp).ToList();
-        foreach (var op in opsToRemove)
+        foreach (var op in opsToRemove.Where(op => _log.Remove(op, out var _)))
         {
-            if (_log.Remove(op, out var removedEntry))
-            {
-                Log.Debug("Replica {ReplicaId}: Removed existing log entry {Op} during suffix replacement.", Replica,
-                    op);
-                // Potentially dispose resources if LogEntry held any unmanaged ones, though unlikely here.
-            }
+            Log.Debug("Replica {ReplicaId}: Removed existing log entry {Op} during suffix replacement.", Replica,
+                op);
+            // Potentially dispose resources if LogEntry held any unmanaged ones, though unlikely here.
         }
 
         _prepareOkCounts.Clear();
 
-        ulong maxOpInSuffix = Op;
+        var maxOpInSuffix = Op;
         foreach (var entry in suffix)
         {
             if (entry.Op < startingOp)
@@ -170,6 +182,7 @@ public class ReplicaState(byte replica, byte totalReplicas, IStateMachine stateM
     public void SetStatusNormal(uint newView, ulong newOp, ulong newCommit)
     {
         var previousView = View;
+        var previousStatus = Status;
         Log.Information("Replica {ReplicaId}: Transitioning to Normal status. View: {View}, Op: {Op}, Commit: {Commit}",
             Replica, newView, newOp, newCommit);
 
@@ -182,6 +195,7 @@ public class ReplicaState(byte replica, byte totalReplicas, IStateMachine stateM
         StatusViewNumber = 0;
         if (oldStatusViewNumber > 0) ClearViewChangeState(oldStatusViewNumber);
         if (previousView > 0 && previousView != newView) ClearViewChangeState(previousView);
+        if (previousStatus == ReplicaStatus.Recovering) CompleteRecovery();
     }
 
     public void ClearViewChangeState(uint view)
@@ -225,10 +239,10 @@ public class ReplicaState(byte replica, byte totalReplicas, IStateMachine stateM
         return entry;
     }
 
-    public LogEntry GetLogEntry(ulong opNumber)
+    public LogEntry? GetLogEntry(ulong opNumber)
     {
         _log.TryGetValue(opNumber, out var entry);
-        return entry!;
+        return entry;
     }
 
 
@@ -356,5 +370,84 @@ public class ReplicaState(byte replica, byte totalReplicas, IStateMachine stateM
     public bool HasEnoughPrepareOks(ulong opNumber)
     {
         return _prepareOkCounts.TryGetValue(opNumber, out var replicas) && replicas.Count >= QuorumSize;
+    }
+
+    public void StartRecovery(UInt128 nonce)
+    {
+        Log.Information("Replica {ReplicaId}: Starting recovery process with Nonce {Nonce}.", Replica, nonce);
+        Status = ReplicaStatus.Recovering;
+        CurrentRecoveryNonce = nonce;
+        _recoveryResponses.Clear();
+        _highestRecoveryViewSeen = View;
+        ClearViewChangeState(StatusViewNumber);
+        ClearViewChangeState(View);
+        StatusViewNumber = 0;
+    }
+
+    public bool AddRecoveryResponse(RecoveryResponseData data)
+    {
+        if (Status != ReplicaStatus.Recovering || data.Nonce != CurrentRecoveryNonce)
+        {
+            Log.Warning(
+                "Replica {ReplicaId}: Ignoring recovery response. Status={Status} or Nonce mismatch (Expected={ExpectedNonce}, Got={GotNonce}).",
+                Replica, Status, CurrentRecoveryNonce, data.Nonce);
+            return false;
+        }
+
+        if (!_recoveryResponses.TryGetValue(data.View, out var responsesForView))
+        {
+            responsesForView = [];
+            _recoveryResponses[data.View] = responsesForView;
+        }
+
+        if (responsesForView.Any(r => r.SenderId == data.SenderId))
+        {
+            Log.Debug("Replica {ReplicaId}: Ignoring duplicate RecoveryResponse from {SenderId} for View {View}.",
+                Replica, data.SenderId, data.View);
+            return responsesForView.Count >= QuorumSize;
+        }
+
+        responsesForView.Add(data);
+        Log.Debug(
+            "Replica {ReplicaId}: Added RecoveryResponse from {SenderId} for View {View}. Count for V{View}: {Count}/{Needed}",
+            Replica, data.SenderId, data.View, data.View, responsesForView.Count, QuorumSize);
+
+        if (data.View > _highestRecoveryViewSeen)
+        {
+            _highestRecoveryViewSeen = data.View;
+            Log.Information("Replica {ReplicaId}: Highest recovery view seen updated to {View}.", Replica,
+                _highestRecoveryViewSeen);
+        }
+
+        return _recoveryResponses.TryGetValue(_highestRecoveryViewSeen, out var highestViewResponses) &&
+               highestViewResponses.Count >= QuorumSize;
+    }
+
+    public (List<RecoveryResponseData>? QuorumData, RecoveryResponseData? PrimaryData) GetRecoveryQuorumData()
+    {
+        if (Status != ReplicaStatus.Recovering ||
+            !_recoveryResponses.TryGetValue(_highestRecoveryViewSeen, out var responses) ||
+            responses.Count < QuorumSize) return (null, null);
+
+        var primaryResponse = responses.FirstOrDefault(r => r.IsPrimary);
+        if (primaryResponse == null)
+        {
+            Log.Warning(
+                "Replica {ReplicaId}: Recovery quorum reached for View {View}, but no primary found in responses.",
+                Replica, _highestRecoveryViewSeen);
+            return (responses, null);
+        }
+
+        Log.Information("Replica {ReplicaId}: Recovery quorum reached for View {View} with Primary {PrimaryId}.",
+            Replica, _highestRecoveryViewSeen, primaryResponse.SenderId);
+        return (responses, primaryResponse);
+    }
+
+    public void CompleteRecovery()
+    {
+        Log.Information("Replica {ReplicaId}: Recovery process completed.", Replica);
+        CurrentRecoveryNonce = null;
+        _recoveryResponses.Clear();
+        _highestRecoveryViewSeen = 0;
     }
 }

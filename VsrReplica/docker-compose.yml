@@ -1,0 +1,37 @@
+services:
+  replica-0:
+    build: .
+    container_name: replica-0
+    command: replica 0 172.28.0.10:5000,172.28.0.11:5001,172.28.0.12:5002
+    networks:
+      vsr_net:
+        ipv4_address: 172.28.0.10 # Assign static IP
+    ports:
+      - "9000:5000" # Map host port to container port (optional, for external access)
+
+  replica-1:
+    build: .
+    container_name: replica-1
+    command: replica 1 172.28.0.10:5000,172.28.0.11:5001,172.28.0.12:5002
+    networks:
+      vsr_net:
+        ipv4_address: 172.28.0.11 # Assign static IP
+    ports:
+      - "9001:5001"
+
+  replica-2:
+    build: .
+    container_name: replica-2
+    command: replica 2 172.28.0.10:5000,172.28.0.11:5001,172.28.0.12:5002
+    networks:
+      vsr_net:
+        ipv4_address: 172.28.0.12 # Assign static IP
+    ports:
+      - "9002:5002"
+
+networks:
+  vsr_net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16

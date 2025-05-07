@@ -8,32 +8,33 @@ class Program
 {
     static async Task Main(string[] args)
     {
-        // Configure logging
         ConfigureLogging();
+        VsrClient? client = null;
 
         try
         {
-            // Parse cluster endpoints
             Log.Information("Starting VSR client");
             var clusterPorts = args.Length > 0
                 ? args[0].Split(',').Select(int.Parse).ToList()
-                : new List<int> { 9000, 9001, 9002 }; // Default to a few ports if none specified
+                : new List<int> { 5000, 5001, 5002 };
 
             var clusterEndpoints = clusterPorts
-                .Select(p => new IPEndPoint(IPAddress.Loopback, p))
+                .Select(p =>
+                    new IPEndPoint(IPAddress.Loopback,
+                        p))
                 .ToList();
 
-            Log.Information("Connecting to replicas: {Endpoints}",
+            Log.Information("Targeting replicas: {Endpoints}",
                 string.Join(", ", clusterEndpoints.Select(e => e.ToString())));
 
-            // Create and connect client using the new VsrClient
-            await using var client = new global::VsrClient.VsrClient(clusterEndpoints);
-            await client.ConnectAsync();
+            // Use your custom PinnedBlockMemoryPool if desired, or null for default
+            // var memoryPool = new VsrReplica.Networking.MemoryPool.PinnedBlockMemoryPool(); 
+            client = new VsrClient(clusterEndpoints, null);
 
-            // *** CHANGE IS HERE: Call the new PingAsync method ***
-            await client.PingAsync(); // Changed from PingReplicasAsync
+            await client.StartAsync(); // New method to start connection managers
 
-            // Start interactive CLI
+            await client.PingAllAsync();
+
             await RunCliAsync(client);
         }
         catch (Exception ex)
@@ -42,19 +43,40 @@ class Program
         }
         finally
         {
+            if (client != null)
+            {
+                await client.DisposeAsync();
+            }
+
             await Log.CloseAndFlushAsync();
         }
     }
 
-    // This test function remains compatible
-    private static async Task TestMultipleRequests(global::VsrClient.VsrClient client)
+    private static async Task TestMultipleRequests(VsrClient client)
     {
         try
         {
-            Console.WriteLine(await client.SetAsync("key1", "value1"));
-            Console.WriteLine(await client.SetAsync("key2", "value2"));
-            Console.WriteLine(await client.GetAsync("key1"));
-            Console.WriteLine(await client.GetAsync("key2"));
+            var tasks = new List<Task>();
+            for (var i = 0; i < 100000; i++)
+            {
+                // Add some variation to keys/values for easier debugging if needed
+                tasks.Add(client.SetAsync($"testkey{i}", $"testvalue{DateTime.UtcNow.Ticks}-{i}"));
+            }
+
+            await Task.WhenAll(tasks);
+            Log.Information("TestMultipleRequests: All SET requests completed.");
+
+            var getTasks = new List<Task<string>>();
+            for (var i = 0; i < 5; i++)
+            {
+                getTasks.Add(client.GetAsync($"testkey{i}"));
+            }
+
+            var results = await Task.WhenAll(getTasks);
+            for (var i = 0; i < results.Length; i++)
+            {
+                Log.Information("TestMultipleRequests: GetAsync key{Index} result: {Result}", i, results[i]);
+            }
         }
         catch (Exception ex)
         {
@@ -63,8 +85,7 @@ class Program
         }
     }
 
-
-    static async Task RunCliAsync(global::VsrClient.VsrClient client)
+    static async Task RunCliAsync(VsrClient client)
     {
         Console.WriteLine("VSR Client CLI");
         Console.WriteLine("Available commands: get <key>, set <key> <value>, update <key> <value>, ping, test, exit");
@@ -74,74 +95,74 @@ class Program
             Console.Write("> ");
             var line = Console.ReadLine();
 
-            if (string.IsNullOrWhiteSpace(line))
-                continue;
+            if (string.IsNullOrWhiteSpace(line)) continue;
 
-            var parts = line.Trim().Split(' ', 3); // Split into command, key, and value (max 3 parts)
+            var parts = line.Trim().Split(' ', 3);
             var command = parts[0].ToLowerInvariant();
+            var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30)); // Command timeout
 
             try
             {
                 switch (command)
                 {
                     case "get" when parts.Length >= 2:
-                        var result = await client.GetAsync(parts[1]);
+                        var result = await client.GetAsync(parts[1], cts.Token);
                         Console.WriteLine($"Result: {result}");
                         break;
-
                     case "set" when parts.Length >= 3:
-                        var setResult = await client.SetAsync(parts[1], parts[2]);
+                        var setResult = await client.SetAsync(parts[1], parts[2], cts.Token);
                         Console.WriteLine(setResult);
                         break;
-
                     case "update" when parts.Length >= 3:
-                        var updateResult = await client.UpdateAsync(parts[1], parts[2]);
+                        var updateResult = await client.UpdateAsync(parts[1], parts[2], cts.Token);
                         Console.WriteLine(updateResult);
                         break;
-
                     case "test":
                         Console.WriteLine("Running test sequence...");
                         await TestMultipleRequests(client);
                         Console.WriteLine("Test sequence finished.");
                         break;
-
                     case "ping":
-                        await client.PingAsync(); // This call matches the new client method
-                        Console.WriteLine("Ping command sent.");
+                        await client.PingAllAsync(cts.Token);
+                        Console.WriteLine("Ping command sent to all.");
                         break;
-
-                    case "exit":
-                    case "quit":
+                    case "exit" or "quit":
                         return;
-
                     default:
-                        Console.WriteLine(
-                            "Invalid command or arguments. Available: get <key>, set <key> <value>, update <key> <value>, ping, test, exit");
+                        Console.WriteLine("Invalid command or arguments.");
                         break;
                 }
             }
-            catch (OperationCanceledException ex) // Catch timeouts specifically
+            catch (OperationCanceledException ex) when (ex.CancellationToken == cts.Token)
             {
-                Console.WriteLine($"Error: Request timed out or cancelled. {ex.Message}");
-                Log.Warning(ex, "Request timed out or cancelled for command: {Command}", command);
+                Console.WriteLine($"Error: Command timed out. {ex.Message}");
+                Log.Warning(ex, "Command timed out: {Command}", command);
+            }
+            catch (OperationCanceledException ex) // Other cancellations (e.g. client shutdown)
+            {
+                Console.WriteLine($"Error: Operation cancelled. {ex.Message}");
+                Log.Warning(ex, "Operation cancelled for command: {Command}", command);
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error: {ex.Message}");
+                Console.WriteLine($"Error: {ex.GetType().Name} - {ex.Message}");
                 Log.Error(ex, "Error executing command: {Command}", command);
-                // Consider if certain errors mean the client should try reconnecting or selecting a new primary
+            }
+            finally
+            {
+                cts.Dispose();
             }
         }
     }
 
     static void ConfigureLogging()
     {
-        // Basic console logger, adjust as needed
         Log.Logger = new LoggerConfiguration()
-            .MinimumLevel.Debug() // Set to Debug to see connection/message details
+            .MinimumLevel.Information() // Debug for connection details
+            .Enrich.WithThreadId()
             .Enrich.WithExceptionDetails()
             .WriteTo.Console(
-                outputTemplate: "[{Timestamp:HH:mm:ss} {Level:u3}] {Message:lj}{NewLine}{Exception}")
+                outputTemplate: "[{Timestamp:HH:mm:ss.fff} thr:{ThreadId} {Level:u3}] {Message:lj}{NewLine}{Exception}")
             .CreateLogger();
     }
 }

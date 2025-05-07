@@ -85,6 +85,14 @@ public class PrepareOkHandler : IVsrCommandHandler
         while (currentOp <= opNumberReachedQuorum && state.HasEnoughPrepareOks(currentOp))
         {
             var logEntry = state.GetLogEntry(currentOp);
+            if (logEntry == null) // Add null check
+            {
+                Log.Error(
+                    "Replica {ReplicaId} (Primary): Log entry missing for Op={OpNumber} during commit sequence. Stopping.",
+                    state.Replica, currentOp);
+                break; // Or handle appropriately
+            }
+
             var clientEntry = state.GetClientTableEntry(logEntry.Client);
             var needsExecution = clientEntry is not { Executed: true } ||
                                  clientEntry.Request != logEntry.Request;

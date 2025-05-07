@@ -9,7 +9,8 @@ namespace VsrReplica.VsrCore.ReplicaInternals;
 public class ReplicaContext(
     ReplicaState state,
     ApplicationPipeline<VsrMessage> applicationPipeline,
-    INetworkManager manager)
+    INetworkManager manager,
+    Func<Task> initiateRecoveryCallback)
     : IReplicaContext
 {
     public ReplicaState State { get; set; } = state;
@@ -40,5 +41,10 @@ public class ReplicaContext(
     public ConnectionId? GetConnectionIdForReplica(byte replicaId)
     {
         return manager.GetConnectionIdForReplica(replicaId);
+    }
+
+    public async Task InitiateRecoveryAsync()
+    {
+        await initiateRecoveryCallback();
     }
 }

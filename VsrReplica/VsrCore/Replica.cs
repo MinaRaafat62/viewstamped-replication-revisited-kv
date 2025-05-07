@@ -51,11 +51,12 @@ public class Replica : IDisposable
                 $"Could not find own endpoint {NetworkConfig.Replica} in the provided replica map.");
         }
 
-
         _replicaMap = replicaMap;
 
         _networkManager = new TcpNetworkManager<VsrMessage>(
             NetworkConfig.Replica,
+            selfReplicaId.Value,
+            replicaMap,
             senderPool,
             transportScheduler,
             applicationScheduler,
@@ -64,8 +65,7 @@ public class Replica : IDisposable
             HandleMessageReceived,
             HandleProcessingError,
             HandleConnectionClosed,
-            HandleConnectionFailed,
-            replicaMap
+            HandleConnectionFailed
         );
         _state = new ReplicaState(
             replica: selfReplicaId.Value,
@@ -73,22 +73,26 @@ public class Replica : IDisposable
             new KvStore(),
             memoryPool);
 
-        _replicaContext = new ReplicaContext(
-            _state,
-            _applicationPipeline,
-            _networkManager);
-
         Action<InternalEventPipelineItem> enqueueAction = (pipelineMsg) =>
             _applicationPipeline.EnqueueInternalEventAsync(pipelineMsg.Type).AsTask().Wait();
 
         IReplicaTimer primaryMonitorTimer = new PrimaryMonitorTimer(_state.Replica, enqueueAction);
         IReplicaTimer primaryIdleCommitTimer = new PrimaryIdleCommitTimer(_state.Replica, enqueueAction);
+
         _lifecycleManager = new ReplicaLifecycleManager(
             _state,
             primaryMonitorTimer,
-            primaryIdleCommitTimer,
-            _replicaContext
+            primaryIdleCommitTimer
         );
+
+        _replicaContext = new ReplicaContext(
+            _state,
+            _applicationPipeline,
+            _networkManager,
+            _lifecycleManager.InitiateRecoveryProtocolAsync
+        );
+
+        _lifecycleManager.SetReplicaContext(_replicaContext);
     }
 
     private async Task ProcessMessagesAsync(CancellationToken cancellationToken = default)
@@ -131,7 +135,8 @@ public class Replica : IDisposable
                         break;
                     }
                     default:
-                        throw new ArgumentOutOfRangeException();
+                        throw new ArgumentOutOfRangeException(
+                            $"Unknown message type: {message.Type}. This should not happen.");
                 }
 
                 if (statePotentiallyChanged)
@@ -158,16 +163,19 @@ public class Replica : IDisposable
         return ValueTask.CompletedTask;
     }
 
-    private ValueTask HandleConnectionClosed(ConnectionId connectionId, IPEndPoint? endpoint, Exception? ex)
+    private ValueTask HandleConnectionClosed(ConnectionId connectionId, IPEndPoint? endpoint, bool isOtherReplica,
+        Exception? ex)
     {
-        Log.Error(ex, "App: Connection error on {EndPoint}", endpoint);
+        Log.Error(ex, "App: Connection {ConnId} closed. Is other replica: {IsOtherReplica}", connectionId,
+            isOtherReplica);
         _lifecycleManager.UpdateTimerStates();
         return ValueTask.CompletedTask;
     }
 
     private ValueTask HandleConnectionFailed(IPEndPoint endpoint, Exception exception)
     {
-        Log.Information("App: Connection established to {EndPoint}", endpoint);
+        Log.Warning(exception, "App: Explicit connection attempt to {EndPoint} failed. Background retry active.",
+            endpoint);
         _lifecycleManager.UpdateTimerStates();
         return ValueTask.CompletedTask;
     }
@@ -178,41 +186,6 @@ public class Replica : IDisposable
         var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token, cancellationToken);
         var token = linkedCts.Token;
         _ = _networkManager.StartAsync();
-
-        _ = Task.Run(async () =>
-        {
-            try
-            {
-                await Task.Delay(1000, token);
-
-                if (_state.TotalReplicas > 1)
-                {
-                    Log.Information("Replica {ReplicaId}: Connecting to other replicas...", _state.Replica);
-                    var connectTasks = new List<Task>();
-                    if (connectTasks == null) throw new ArgumentNullException(nameof(connectTasks));
-                    foreach (var kvp in _replicaMap.Where(kvp => kvp.Key != _state.Replica))
-                    {
-                        if (token.IsCancellationRequested) break;
-                        Log.Debug("Replica {ReplicaId}: Attempting connection to Replica {TargetId} at {EndPoint}",
-                            _state.Replica, kvp.Key, kvp.Value);
-                        connectTasks.Add(_networkManager.ConnectAsync(kvp.Value, token));
-                    }
-                }
-
-                // Initial timer state update after attempting connections
-                _lifecycleManager.UpdateTimerStates();
-            }
-            catch (OperationCanceledException)
-            {
-                Log.Information("Replica {ReplicaId}: Connection attempts cancelled.", _state.Replica);
-            }
-            catch (Exception ex)
-            {
-                Log.Error(ex, "Replica {ReplicaId}: Error during initial connection attempts.", _state.Replica);
-            }
-        }, token);
-
-
         _ = ProcessMessagesAsync(token);
     }
 

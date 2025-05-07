@@ -10,6 +10,7 @@
     <ItemGroup>
       <PackageReference Include="Blake3" Version="2.0.0" />
       <PackageReference Include="Serilog" Version="4.2.0" />
+      <PackageReference Include="Serilog.Enrichers.Thread" Version="4.0.0" />
       <PackageReference Include="Serilog.Exceptions" Version="8.4.0" />
       <PackageReference Include="Serilog.Sinks.Console" Version="6.0.0" />
       <PackageReference Include="System.IO.Pipelines" Version="9.0.4" />

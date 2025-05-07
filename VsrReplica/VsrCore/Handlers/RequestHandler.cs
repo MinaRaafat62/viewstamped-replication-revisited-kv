@@ -94,6 +94,14 @@ public class RequestHandler : IVsrCommandHandler
         while (currentOp <= opNumberToCommit && state.HasEnoughPrepareOks(currentOp))
         {
             var logEntry = state.GetLogEntry(currentOp);
+            if (logEntry == null) // Add null check
+            {
+                Log.Error(
+                    "Replica {ReplicaId} (Primary): Log entry missing for Op={OpNumber} during commit sequence. Stopping.",
+                    state.Replica, currentOp);
+                break;
+            }
+
             var result = state.ExecuteAndCommitOperation(currentOp);
             if (result != null) // Commit successful
             {

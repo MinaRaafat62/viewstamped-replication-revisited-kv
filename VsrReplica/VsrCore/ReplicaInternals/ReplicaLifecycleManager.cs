@@ -11,25 +11,87 @@ public class ReplicaLifecycleManager : IDisposable
     private readonly ReplicaState _state;
     private readonly IReplicaTimer _primaryMonitorTimer;
     private readonly IReplicaTimer _primaryIdleCommitTimer;
-    private readonly IReplicaContext _replicaContext;
+    private IReplicaContext ReplicaContext { get; set; } = null!;
 
     private bool _disposed;
+    private Task? _recoveryBroadcastTask = null;
 
 
     public ReplicaLifecycleManager(
         ReplicaState state,
         IReplicaTimer primaryMonitorTimer,
-        IReplicaTimer primaryIdleCommitTimer,
-        IReplicaContext replicaContext)
+        IReplicaTimer primaryIdleCommitTimer)
     {
         _state = state ?? throw new ArgumentNullException(nameof(state));
         _primaryMonitorTimer = primaryMonitorTimer ?? throw new ArgumentNullException(nameof(primaryMonitorTimer));
         _primaryIdleCommitTimer =
             primaryIdleCommitTimer ?? throw new ArgumentNullException(nameof(primaryIdleCommitTimer));
-        _replicaContext = replicaContext ?? throw new ArgumentNullException(nameof(replicaContext));
 
         Log.Information("Replica {ReplicaId}: Lifecycle Manager initialized.", _state.Replica);
+    }
+
+    public void SetReplicaContext(IReplicaContext replicaContext)
+    {
+        ReplicaContext = replicaContext ?? throw new ArgumentNullException(nameof(replicaContext));
         UpdateTimerStates();
+    }
+
+    public async Task InitiateRecoveryProtocolAsync()
+    {
+        // Prevent multiple concurrent recovery attempts (optional but good practice)
+        if (_state.Status == ReplicaStatus.Recovering && _recoveryBroadcastTask != null &&
+            !_recoveryBroadcastTask.IsCompleted)
+        {
+            Log.Warning("Replica {ReplicaId}: Recovery already in progress, ignoring initiation request.",
+                _state.Replica);
+            return;
+        }
+
+        Log.Warning("Replica {ReplicaId}: Initiating recovery protocol.", _state.Replica);
+
+        var nonce = BinaryUtils.NewGuidUInt128();
+        _state.StartRecovery(nonce);
+        UpdateTimerStates(); // Stop normal timers (call own method)
+
+        var recoveryPayload = new Recovery(nonce);
+        var payloadSize = Recovery.CalculateSerializedSize(recoveryPayload);
+
+        var recoveryHeader = new VsrHeader(
+            parent: 0, client: 0, context: 0,
+            bodySize: (uint)payloadSize,
+            request: 0, cluster: _state.Cluster, epoch: _state.Epoch,
+            view: _state.View,
+            op: _state.Op,
+            commit: _state.Commit,
+            offset: 0,
+            replica: _state.Replica,
+            command: Command.Recovery,
+            operation: Operation.Reserved, version: GlobalConfig.CurrentVersion
+        );
+
+        // Rent buffer and serialize payload
+        var payloadBytes = new byte[payloadSize];
+
+        Recovery.Serialize(recoveryPayload, payloadBytes.AsSpan());
+        var payloadMemory = payloadBytes.AsMemory();
+
+        var recoveryMessage = new VsrMessage(recoveryHeader, payloadMemory);
+
+        Log.Information("Replica {ReplicaId}: Broadcasting RECOVERY message with Nonce {Nonce}.", _state.Replica,
+            nonce);
+        using var serializedMsg = VsrMessageSerializer.SerializeMessage(recoveryMessage, _state.MemoryPool);
+        try
+        {
+            _recoveryBroadcastTask = ReplicaContext.BroadcastAsync(serializedMsg);
+            await _recoveryBroadcastTask;
+        }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "Replica {ReplicaId}: Failed to broadcast RECOVERY message.", _state.Replica);
+            _recoveryBroadcastTask = null; // Reset task reference
+            _state.SetStatusNormal(_state.View, _state.Op, _state.Commit); // Revert status
+            UpdateTimerStates(); // Restart timers
+        }
     }
 
     public void UpdateTimerStates()
@@ -39,40 +101,44 @@ public class ReplicaLifecycleManager : IDisposable
         Log.Debug("Replica {ReplicaId}: Updating timer states. IsPrimary={IsPrimary}, Status={Status}",
             _state.Replica, _state.IsPrimary, _state.Status);
 
-        if (_state.Status == ReplicaStatus.Normal)
+        // Stop both timers by default
+        _primaryMonitorTimer.Stop();
+        _primaryIdleCommitTimer.Stop();
+
+        switch (_state.Status)
         {
-            if (_state.IsPrimary)
-            {
-                _primaryMonitorTimer.Stop();
-                _primaryIdleCommitTimer.Start(GlobalConfig.PrimaryIdleCommitInterval);
-                Log.Debug("Replica {ReplicaId}: Configured as PRIMARY. Started IdleCommitTimer, Stopped MonitorTimer.",
-                    _state.Replica);
-            }
-            else
-            {
-                _primaryIdleCommitTimer.Stop();
-                var primaryConn = _replicaContext.GetConnectionIdForReplica(_state.PrimaryReplica);
-                if (primaryConn.HasValue)
+            case ReplicaStatus.Normal:
+                if (_state.IsPrimary)
                 {
-                    _primaryMonitorTimer.Start(GlobalConfig.BackupPrimaryTimeoutDuration);
-                    Log.Debug(
-                        "Replica {ReplicaId}: Configured as BACKUP. Started MonitorTimer (Primary connected), Stopped IdleCommitTimer.",
-                        _state.Replica);
+                    _primaryMonitorTimer.Stop();
+                    _primaryIdleCommitTimer.Start(GlobalConfig.PrimaryIdleCommitInterval);
+                    Log.Debug("Replica {ReplicaId}: Configured as PRIMARY. Started IdleCommitTimer.", _state.Replica);
                 }
                 else
                 {
-                    _primaryMonitorTimer.Stop();
-                    Log.Warning(
-                        "Replica {ReplicaId}: Configured as BACKUP but Primary {PrimaryId} not connected. MonitorTimer stopped.",
-                        _state.Replica, _state.PrimaryReplica);
+                    _primaryIdleCommitTimer.Stop();
+                    _primaryMonitorTimer.Start(GlobalConfig.BackupPrimaryTimeoutDuration);
+                    var primaryConn = ReplicaContext.GetConnectionIdForReplica(_state.PrimaryReplica);
+                    if (!primaryConn.HasValue)
+                    {
+                        Log.Warning(
+                            "Replica {ReplicaId}: Configured as BACKUP but Primary {PrimaryId} not connected. MonitorTimer stopped.",
+                            _state.Replica, _state.PrimaryReplica);
+                    }
                 }
-            }
-        }
-        else
-        {
-            _primaryMonitorTimer.Stop();
-            _primaryIdleCommitTimer.Stop();
-            Log.Debug("Replica {ReplicaId}: Status is {Status}. Stopped both timers.", _state.Replica, _state.Status);
+
+                break;
+
+            case ReplicaStatus.ViewChange:
+            case ReplicaStatus.Recovering:
+                Log.Debug("Replica {ReplicaId}: Status is {Status}. Stopped both timers.", _state.Replica,
+                    _state.Status);
+                break;
+
+            default:
+                Log.Warning("Replica {ReplicaId}: Unknown status {Status} in UpdateTimerStates.", _state.Replica,
+                    _state.Status);
+                break;
         }
     }
 
@@ -102,7 +168,12 @@ public class ReplicaLifecycleManager : IDisposable
     {
         Log.Warning("Replica {ReplicaId}: Handling PrimaryTimeout event. Current View: {View}, Status: {Status}",
             _state.Replica, _state.View, _state.Status);
-        
+        if (_state is { Op: 0, Commit: 0 })
+        {
+            Log.Verbose("Replica {ReplicaId}: Ignoring PrimaryTimeout event (Op=0, Commit=0).", _state.Replica);
+            return;
+        }
+
         if (_state.IsPrimary || _state.Status == ReplicaStatus.Recovering)
         {
             Log.Information(
@@ -110,15 +181,16 @@ public class ReplicaLifecycleManager : IDisposable
                 _state.Replica, _state.IsPrimary, _state.Status);
             return;
         }
+
         _state.InitiateViewChange();
         _state.AddStartViewChangeVote(_state.StatusViewNumber, _state.Replica);
-        
+
         var nextView = _state.StatusViewNumber;
         var startViewChangeHeader = new VsrHeader(
             parent: 0, client: 0, context: BinaryUtils.NewGuidUInt128(),
             bodySize: 0, request: 0, cluster: _state.Cluster, epoch: _state.Epoch,
-            view: nextView, 
-            op: _state.Op, 
+            view: nextView,
+            op: _state.Op,
             commit: _state.Commit,
             offset: 0,
             replica: _state.Replica,
@@ -132,7 +204,7 @@ public class ReplicaLifecycleManager : IDisposable
         var serializedMsg = VsrMessageSerializer.SerializeMessage(startViewChangeMessage, _state.MemoryPool);
         try
         {
-            await _replicaContext.BroadcastAsync(serializedMsg).ConfigureAwait(false);
+            await ReplicaContext.BroadcastAsync(serializedMsg).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -151,6 +223,12 @@ public class ReplicaLifecycleManager : IDisposable
         Log.Debug("Replica {ReplicaId}: Handling SendIdleCommit event. IsPrimary={IsPrimary}, Status={Status}",
             _state.Replica, _state.IsPrimary, _state.Status);
 
+        // if (_state is { Op: 0, Commit: 0 })
+        // {
+        //     Log.Verbose("Replica {ReplicaId}: Ignoring SendIdleCommit event (Op=0, Commit=0).", _state.Replica);
+        //     return;
+        // }
+
         if (!_state.IsPrimary || _state.Status != ReplicaStatus.Normal)
         {
             Log.Debug("Replica {ReplicaId}: Ignoring SendIdleCommit event (Not Primary or not Normal).",
@@ -161,12 +239,8 @@ public class ReplicaLifecycleManager : IDisposable
         var commitHeader = new VsrHeader(
             parent: 0, client: 0, context: BinaryUtils.NewGuidUInt128(),
             bodySize: 0, request: 0, cluster: _state.Cluster, epoch: _state.Epoch,
-            view: _state.View,
-            op: _state.Op,
-            commit: _state.Commit,
-            offset: 0,
-            replica: _state.Replica,
-            command: Command.Commit,
+            view: _state.View, op: _state.Op, commit: _state.Commit,
+            offset: 0, replica: _state.Replica, command: Command.Commit,
             operation: Operation.Reserved, version: GlobalConfig.CurrentVersion
         );
         var commitMessage = new VsrMessage(commitHeader, Memory<byte>.Empty);
@@ -178,7 +252,7 @@ public class ReplicaLifecycleManager : IDisposable
         using var serializedMsg = VsrMessageSerializer.SerializeMessage(commitMessage, _state.MemoryPool);
         try
         {
-            await _replicaContext.BroadcastAsync(serializedMsg).ConfigureAwait(false);
+            await ReplicaContext.BroadcastAsync(serializedMsg).ConfigureAwait(false);
             _primaryIdleCommitTimer.ActivityDetected();
         }
         catch (Exception ex)
