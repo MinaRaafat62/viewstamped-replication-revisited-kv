@@ -108,14 +108,8 @@ public class DoViewChangeHandler : IVsrCommandHandler
                 state.Replica, newOpNumber, newCommitNumber);
             newOpNumber = newCommitNumber; // Ensure Op is at least Commit
         }
-
-        if (state.Op < newOpNumber)
-        {
-            Log.Debug("Replica {ReplicaId} (New Primary): Explicitly setting state.Op to {NewOp} based on bestData.",
-                state.Replica, newOpNumber);
-            state.Op = newOpNumber;
-        }
-
+        
+        state.Op = newOpNumber;
         state.SetStatusNormal(receivedView, state.Op, newCommitNumber);
 
         await ExecuteAndReplyNewlyCommittedOpsAsync(oldCommitNumber, newCommitNumber, context);
@@ -142,22 +136,11 @@ public class DoViewChangeHandler : IVsrCommandHandler
             replica: state.Replica, command: Command.StartView,
             operation: Operation.Reserved, version: GlobalConfig.CurrentVersion
         );
-
         var startViewMessage = new VsrMessage(startViewHeader, svPayloadMemory);
         using var serializedSv = VsrMessageSerializer.SerializeMessage(startViewMessage, state.MemoryPool);
-
-        try
-        {
-            await context.BroadcastAsync(serializedSv).ConfigureAwait(false);
-            Log.Information("Replica {ReplicaId} (Primary): Broadcasted StartView for V:{View}.", state.Replica,
-                state.View);
-        }
-        catch (Exception ex)
-        {
-            Log.Error(ex, "Replica {ReplicaId} (Primary): Failed to broadcast StartView for V:{View}.", state.Replica,
-                state.View);
-        }
-
+        await context.BroadcastAsync(serializedSv).ConfigureAwait(false);
+        Log.Information("Replica {ReplicaId} (Primary): Broadcasted StartView for V:{View}.", state.Replica,
+            state.View); 
         return true;
     }
 
@@ -221,14 +204,27 @@ public class DoViewChangeHandler : IVsrCommandHandler
             executedCount++;
             Log.Information("Replica {ReplicaId} (Primary): Executed Op {OpNumber} post-view-change.", state.Replica,
                 op);
-            var updatedClientEntry = state.GetClientTableEntry(logEntry.Client);
-            if (updatedClientEntry?.Response == null)
-            {
-                Log.Warning(
-                    "Replica {ReplicaId} (Primary): Op {OpNumber} executed, but no response found in client table for Client {ClientId}, Req {Request}.",
-                    state.Replica, op, logEntry.Client, logEntry.Request);
-                continue;
-            }
+            var replyHeader = new VsrHeader(
+                parent: 0, // Or a relevant context if available from original request
+                client: logEntry.Client,
+                context: BinaryUtils.NewGuidUInt128(), // Generate a new context for the reply
+                bodySize: (uint)result.Length,
+                request: logEntry.Request, // Original request number
+                cluster: state.Cluster,
+                epoch: state.Epoch,
+                view: state.View,       // Current view of the new primary
+                op: op,                 // Op number that generated the reply
+                commit: state.Commit,   // Current commit number of the new primary
+                offset: 0,
+                replica: state.Replica, // Sender is this new primary
+                command: Command.Reply,
+                operation: logEntry.Operation, // Original operation type
+                version: GlobalConfig.CurrentVersion
+            );
+            var replyMessage = new VsrMessage(replyHeader, result.AsMemory());
+            state.UpdateClientTable(logEntry.Client, logEntry.Request, replyMessage);
+
+           
 
             var clientId = logEntry.Client;
             var clientConnectionId = state.GetClientConnectionId(clientId);
@@ -237,7 +233,7 @@ public class DoViewChangeHandler : IVsrCommandHandler
                 state.Replica, op, clientId, logEntry.Request, clientConnectionId.Id);
 
             using var serializedReply =
-                VsrMessageSerializer.SerializeMessage(updatedClientEntry.Response, state.MemoryPool);
+                VsrMessageSerializer.SerializeMessage(replyMessage, state.MemoryPool);
             try
             {
                 await context.SendAsync(clientConnectionId, serializedReply).ConfigureAwait(false);

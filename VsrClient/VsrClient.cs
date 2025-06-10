@@ -577,39 +577,55 @@ public class VsrClient : IAsyncDisposable
                 _parentClient.NotifyConnectionStatusChanged(this, false);
             }
 
-            if (!wasConnectedAndNeedsRetry || sessionCtsToCleanup == null)
-                return Task.CompletedTask;
-            using var cts = CancellationTokenSource.CreateLinkedTokenSource(disposalToken, sessionCtsToCleanup.Token);
-            ScheduleRetry(cts.Token);
+            if (!mainLoopIsExiting && !disposalToken.IsCancellationRequested && wasConnectedAndNeedsRetry)
+            {
+                ScheduleRetry(disposalToken);
+            }
 
             return Task.CompletedTask;
         }
 
-        private void ScheduleRetry(CancellationToken disposalToken)
+        private void ScheduleRetry(CancellationToken overallDisposalToken)
         {
             lock (_stateLock)
             {
-                if (_state == ConnectionState.Disposed || disposalToken.IsCancellationRequested) return;
+                if (_state == ConnectionState.Disposed || overallDisposalToken.IsCancellationRequested) return;
 
                 _retryAttempts++;
                 _state = ConnectionState.Retrying;
                 var delayMs = Math.Min(
                     _parentClient._initialConnectRetryDelay.TotalMilliseconds *
-                    Math.Pow(1.5, Math.Min(_retryAttempts, 8)),
+                    Math.Pow(1.5,
+                        Math.Min(_retryAttempts,
+                            8)), // Max 8 attempts for backoff calculation to avoid overly long delays
                     _parentClient._maxConnectRetryDelay.TotalMilliseconds
                 );
-                var jitter = delayMs * 0.2 * (Random.Shared.NextDouble() * 2 - 1);
-                var finalDelay = TimeSpan.FromMilliseconds(Math.Max(200, delayMs + jitter));
+                var jitter = delayMs * 0.2 * (Random.Shared.NextDouble() * 2 - 1); // +/- 20% jitter
+                var finalDelay = TimeSpan.FromMilliseconds(Math.Max(200, delayMs + jitter)); // Ensure a minimum delay
 
                 Log.Debug("ReplicaConnection[{Endpoint}]: Scheduling connection retry {Attempt} in {Delay}.",
                     EndPoint, _retryAttempts, finalDelay);
-                _retryTimer?.Dispose(); // Dispose previous timer if any
+
+                _retryTimer?.Dispose();
                 _retryTimer = new Timer(_ =>
                 {
-                    if (disposalToken.IsCancellationRequested) return;
+                    // Check the overallDisposalToken before changing state and allowing the main loop to retry
+                    if (overallDisposalToken.IsCancellationRequested)
+                    {
+                        Log.Debug(
+                            "ReplicaConnection[{Endpoint}]: Retry timer fired but instance is disposing. Aborting retry.",
+                            EndPoint);
+                        return;
+                    }
+
                     lock (_stateLock)
                     {
-                        if (_state == ConnectionState.Retrying) _state = ConnectionState.Disconnected;
+                        // Only transition if still in Retrying state; could have been disposed in the meantime.
+                        if (_state != ConnectionState.Retrying) return;
+                        _state = ConnectionState.Disconnected;
+                        Log.Debug(
+                            "ReplicaConnection[{Endpoint}]: Retry timer fired. Transitioning to Disconnected to allow MainConnectionLoop to attempt connection.",
+                            EndPoint);
                     }
                 }, null, finalDelay, Timeout.InfiniteTimeSpan);
             }

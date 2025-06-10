@@ -28,8 +28,8 @@ public class PrimaryMonitorTimer(byte owningReplicaId, Action<InternalEventPipel
             _timeoutDuration = duration;
             if (!_isRunning)
             {
-                Log.Debug("Replica {ReplicaId}: Starting PrimaryMonitorTimer with duration {Duration}.",
-                    owningReplicaId, _timeoutDuration);
+                // Log.Debug("Replica {ReplicaId}: Starting PrimaryMonitorTimer with duration {Duration}.",
+                //     owningReplicaId, _timeoutDuration);
                 _timer = new Timer(OnTimerElapsed, null, _timeoutDuration, Timeout.InfiniteTimeSpan);
                 _stopwatch.Restart();
                 _isRunning = true;
@@ -71,7 +71,7 @@ public class PrimaryMonitorTimer(byte owningReplicaId, Action<InternalEventPipel
         // Must be called within _lock
         if (!_isRunning) return;
 
-        Log.Debug("Replica {ReplicaId}: Stopping PrimaryMonitorTimer.", owningReplicaId);
+        // Log.Debug("Replica {ReplicaId}: Stopping PrimaryMonitorTimer.", owningReplicaId);
         _timer?.Dispose();
         _timer = null;
         _stopwatch.Stop();

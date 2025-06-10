@@ -87,9 +87,9 @@ public class PrimaryIdleCommitTimer(byte owningReplicaId, Action<InternalEventPi
             var elapsedSinceActivity = _stopwatch.Elapsed;
             if (elapsedSinceActivity >= _idleInterval)
             {
-                Log.Debug(
-                    "Replica {ReplicaId}: PrimaryIdleCommitTimer interval elapsed ({ElapsedSinceActivity} >= {Interval}). Enqueuing SendIdleCommit event.",
-                    owningReplicaId, elapsedSinceActivity, _idleInterval);
+                // Log.Debug(
+                //     "Replica {ReplicaId}: PrimaryIdleCommitTimer interval elapsed ({ElapsedSinceActivity} >= {Interval}). Enqueuing SendIdleCommit event.",
+                //     owningReplicaId, elapsedSinceActivity, _idleInterval);
                 _stopwatch.Restart();
                 idleEvent = new InternalEventPipelineItem(PipelineMessageType.SendIdleCommit);
             }

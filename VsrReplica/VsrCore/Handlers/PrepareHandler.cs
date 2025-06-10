@@ -13,65 +13,75 @@ public class PrepareHandler : IVsrCommandHandler
     {
         var state = context.State;
         var header = message.Header;
+        var isOldView = header.View < state.View;
+        var needToInitiateRecovery = header.View > state.View && state.Status == ReplicaStatus.Normal;
+        var isSameView = header.View == state.View;
+        var isSameViewButNotNormal = isSameView && state.Status != ReplicaStatus.Normal;
+        var isSameViewAndIsPrimary = isSameView && state.IsPrimary;
+        var logHoleDetectedAndNeedsRecovery = isSameView && !state.IsPrimary && header.Op > state.Op + 1;
+        var needToResendPrepareOk = isSameView && !state.IsPrimary && header.Op <= state.Op;
 
-        if (state.IsPrimary)
-        {
-            Log.Warning("Replica {ReplicaId} (Primary): Received PREPARE message. Ignoring.", state.Replica);
-            return false; // Primary should not receive PREPARE
-        }
-
-        if (state.Status != ReplicaStatus.Normal)
+        if (isOldView)
         {
             Log.Warning(
-                "Replica {ReplicaId}: Received PREPARE Op={OpNumber} from {SenderId} but status is {Status}. Ignoring.",
-                state.Replica, header.Op, header.Replica, state.Status);
+                "Replica {ReplicaId}: Received PREPARE from old view {MsgView} (current is {CurrentView}). Ignoring.",
+                state.Replica, header.View, state.View);
             return false;
         }
 
-        if (header.View < state.View)
+        if (needToInitiateRecovery)
         {
             Log.Warning(
-                "Replica {ReplicaId}: Received PREPARE Op={OpNumber} from old view {MsgView} (current is {CurrentView}). Ignoring.",
-                state.Replica, header.Op, header.View, state.View);
+                "Replica {ReplicaId}: Received PREPARE from new view {MsgView} (current is {CurrentView}). Initiating recovery.",
+                state.Replica, header.View, state.View);
+            await context.InitiateRecoveryAsync();
             return false;
         }
 
-        if (header.View > state.View)
+        if (isSameViewButNotNormal)
         {
             Log.Warning(
-                "Replica {ReplicaId}: Received PREPARE Op={OpNumber} from new view {MsgView} (current is {CurrentView}). View change needed.",
-                state.Replica, header.Op, header.View, state.View);
-            // TODO: Handle view change initiation or message buffering
+                "Replica {ReplicaId}: Received PREPARE from {SenderId} but status is {Status}. Ignoring.",
+                state.Replica, header.Replica, state.Status);
             return false;
         }
+
+        if (isSameViewAndIsPrimary)
+        {
+            // ignore PREPARE from other replicas
+            Log.Warning(
+                "Replica {ReplicaId} (Primary): Received PREPARE from {SenderId}. Ignoring.",
+                state.Replica, header.Replica);
+            return false;
+        }
+
+        if (logHoleDetectedAndNeedsRecovery)
+        {
+            Log.Warning(
+                "Replica {ReplicaId}: Received PREPARE for Op={OpNumber} but expected Op={ExpectedOp}. Log hole detected! State transfer needed.",
+                state.Replica, header.Op, state.Op + 1);
+            await context.InitiateRecoveryAsync();
+            return false;
+        }
+
+        if (needToResendPrepareOk)
+        {
+            Log.Information(
+                "Replica {ReplicaId}: Received duplicate PREPARE for Op={OpNumber} (Current Op={CurrentOp}). Sending PREPAREOK again.",
+                state.Replica, header.Op, state.Op);
+            // Resend PrepareOK to be safe
+            await SendPrepareOkAsync(message, header.Op, context);
+            return true; // Handled
+        }
+
 
         var opNumber = header.Op;
         var commitNumber = header.Commit;
 
-        if (opNumber <= state.Op)
-        {
-            // Duplicate PREPARE or already processed
-            Log.Information(
-                "Replica {ReplicaId}: Received duplicate PREPARE for Op={OpNumber} (Current Op={CurrentOp}). Sending PREPAREOK again.",
-                state.Replica, opNumber, state.Op);
-            // Resend PrepareOK to be safe
-            await SendPrepareOkAsync(message, opNumber, context);
-            return true; // Handled
-        }
-
-        if (opNumber > state.Op + 1)
-        {
-            Log.Warning(
-                "Replica {ReplicaId}: Received PREPARE for Op={OpNumber} but expected Op={ExpectedOp}. Log hole detected! State transfer needed.",
-                state.Replica, opNumber, state.Op + 1);
-            await context.InitiateRecoveryAsync();
-            return false; 
-        }
-
         var appendedOpNumber = state.AppendLogEntry(header.Operation, message.Payload, header);
         if (appendedOpNumber != opNumber)
         {
-            Log.Error(
+            Log.Fatal(
                 "Replica {ReplicaId}: CRITICAL - Op number mismatch after appending log entry. Expected {ExpectedOp}, Got {GotOp}. State inconsistent.",
                 state.Replica, opNumber, appendedOpNumber);
             // This indicates a serious internal logic error.
@@ -87,6 +97,7 @@ public class PrepareHandler : IVsrCommandHandler
             "Replica {ReplicaId}: PREPARE for Op={OpNumber} carried new commit number {NewCommit} (Current={CurrentCommit}). Processing commits.",
             state.Replica, opNumber, commitNumber, state.Commit);
         await CommitOperationsAsync(commitNumber, context);
+
 
         return true;
     }

@@ -98,8 +98,8 @@ public class ReplicaLifecycleManager : IDisposable
     {
         if (_disposed) return;
 
-        Log.Debug("Replica {ReplicaId}: Updating timer states. IsPrimary={IsPrimary}, Status={Status}",
-            _state.Replica, _state.IsPrimary, _state.Status);
+        // Log.Debug("Replica {ReplicaId}: Updating timer states. IsPrimary={IsPrimary}, Status={Status}",
+        //     _state.Replica, _state.IsPrimary, _state.Status);
 
         // Stop both timers by default
         _primaryMonitorTimer.Stop();
@@ -122,7 +122,7 @@ public class ReplicaLifecycleManager : IDisposable
                     if (!primaryConn.HasValue)
                     {
                         Log.Warning(
-                            "Replica {ReplicaId}: Configured as BACKUP but Primary {PrimaryId} not connected. MonitorTimer stopped.",
+                            "Replica {ReplicaId}: Configured as BACKUP. Primary {PrimaryId} is not currently connected. PrimaryMonitorTimer is active and will trigger a view change if no Prepare/Commit messages are received.",
                             _state.Replica, _state.PrimaryReplica);
                     }
                 }
@@ -168,6 +168,15 @@ public class ReplicaLifecycleManager : IDisposable
     {
         Log.Warning("Replica {ReplicaId}: Handling PrimaryTimeout event. Current View: {View}, Status: {Status}",
             _state.Replica, _state.View, _state.Status);
+
+        if (_state.Status == ReplicaStatus.ViewChange)
+        {
+            Log.Information(
+                "Replica {ReplicaId}: Ignoring PrimaryTimeout event because a view change is already in progress for View {TargetView}.",
+                _state.Replica, _state.StatusViewNumber);
+            return;
+        }
+
         if (_state is { Op: 0, Commit: 0 })
         {
             Log.Verbose("Replica {ReplicaId}: Ignoring PrimaryTimeout event (Op=0, Commit=0).", _state.Replica);
@@ -220,8 +229,8 @@ public class ReplicaLifecycleManager : IDisposable
 
     public async Task HandleSendIdleCommit()
     {
-        Log.Debug("Replica {ReplicaId}: Handling SendIdleCommit event. IsPrimary={IsPrimary}, Status={Status}",
-            _state.Replica, _state.IsPrimary, _state.Status);
+        // Log.Debug("Replica {ReplicaId}: Handling SendIdleCommit event. IsPrimary={IsPrimary}, Status={Status}",
+        //     _state.Replica, _state.IsPrimary, _state.Status);
 
         // if (_state is { Op: 0, Commit: 0 })
         // {
@@ -245,9 +254,9 @@ public class ReplicaLifecycleManager : IDisposable
         );
         var commitMessage = new VsrMessage(commitHeader, Memory<byte>.Empty);
 
-        Log.Debug(
-            "Replica {ReplicaId} (Primary): Broadcasting idle COMMIT message for View {View}, CommitNum {CommitNum}",
-            _state.Replica, _state.View, _state.Commit);
+        // Log.Debug(
+        //     "Replica {ReplicaId} (Primary): Broadcasting idle COMMIT message for View {View}, CommitNum {CommitNum}",
+        //     _state.Replica, _state.View, _state.Commit);
 
         using var serializedMsg = VsrMessageSerializer.SerializeMessage(commitMessage, _state.MemoryPool);
         try

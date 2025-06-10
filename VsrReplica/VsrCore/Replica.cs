@@ -153,7 +153,7 @@ public class Replica : IDisposable
 
     private async ValueTask HandleMessageReceived(ConnectionId connectionId, VsrMessage message)
     {
-        Log.Debug("Replica Received a new Message {Message}", message);
+        // Log.Debug("Replica Received a new Message {Message}", message);
         await _applicationPipeline.EnqueueNetworkMessageAsync(message, connectionId);
     }
 

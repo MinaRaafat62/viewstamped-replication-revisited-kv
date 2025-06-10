@@ -13,21 +13,13 @@ public class CommitHandler : IVsrCommandHandler
         var state = context.State;
         var header = message.Header;
 
-        if (state.IsPrimary)
-        {
-            Log.Warning("Replica {ReplicaId} (Primary): Received COMMIT message. Ignoring.", state.Replica);
-            return false;
-        }
+        var isOldView = header.View < state.View;
+        var needToInitiateRecovery = header.View > state.View && state.Status == ReplicaStatus.Normal;
+        var withTheSameViewButNotNormal = header.View == state.View && state.Status != ReplicaStatus.Normal;
+        var withTheSameViewAndIsPrimary = header.View == state.View && state.IsPrimary;
+        var canProcessCommit = header.View == state.View && state.Status == ReplicaStatus.Normal;
 
-        if (state.Status != ReplicaStatus.Normal)
-        {
-            Log.Warning(
-                "Replica {ReplicaId}: Received COMMIT up to Op={CommitNum} from {SenderId} but status is {Status}. Ignoring.",
-                state.Replica, header.Commit, header.Replica, state.Status);
-            return false;
-        }
-
-        if (header.View < state.View)
+        if (isOldView)
         {
             Log.Warning(
                 "Replica {ReplicaId}: Received COMMIT from old view {MsgView} (current is {CurrentView}). Ignoring.",
@@ -35,30 +27,44 @@ public class CommitHandler : IVsrCommandHandler
             return false;
         }
 
-        if (header.View > state.View)
+        if (needToInitiateRecovery)
         {
             Log.Warning(
-                "Replica {ReplicaId}: Received COMMIT from new view {MsgView} (current is {CurrentView}). View change needed? Ignoring for now.",
+                "Replica {ReplicaId}: Received COMMIT from new view {MsgView} (current is {CurrentView}). Initiating recovery.",
                 state.Replica, header.View, state.View);
-            // TODO: Handle view change initiation or message buffering
+            await context.InitiateRecoveryAsync();
+            return false;
+        }
+
+        if (withTheSameViewButNotNormal)
+        {
+            Log.Warning(
+                "Replica {ReplicaId}: Received COMMIT from {SenderId} but status is {Status}. Ignoring.",
+                state.Replica, header.Replica, state.Status);
+            return false;
+        }
+
+        if (withTheSameViewAndIsPrimary)
+        {
+            Log.Warning(
+                "Replica {ReplicaId} (Primary): Received COMMIT from {SenderId}. Ignoring.",
+                state.Replica, header.Replica);
             return false;
         }
 
         var commitNumber = header.Commit;
 
-        if (commitNumber > state.Commit)
+        if (canProcessCommit)
         {
-            Log.Information(
-                "Replica {ReplicaId}: Received COMMIT message. Primary commit is {PrimaryCommit}, local commit is {LocalCommit}. Processing commits.",
-                state.Replica, commitNumber, state.Commit);
+            // Log.Information(
+            //     "Replica {ReplicaId}: Received COMMIT message. Primary commit is {PrimaryCommit}, local commit is {LocalCommit}. Processing commits.",
+            //     state.Replica, commitNumber, state.Commit);
             await CommitOperationsAsync(commitNumber, context);
         }
-        else
-        {
-            Log.Debug(
-                "Replica {ReplicaId}: Received COMMIT message but Primary commit {PrimaryCommit} is not ahead of local commit {LocalCommit}. No action needed.",
-                state.Replica, commitNumber, state.Commit);
-        }
+
+        // Log.Debug(
+        //     "Replica {ReplicaId}: Received COMMIT message but Primary commit {PrimaryCommit} is not ahead of local commit {LocalCommit}. No action needed.",
+        //     state.Replica, commitNumber, state.Commit);
 
         return true;
     }

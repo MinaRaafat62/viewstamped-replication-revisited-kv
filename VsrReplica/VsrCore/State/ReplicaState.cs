@@ -347,10 +347,17 @@ public class ReplicaState(byte replica, byte totalReplicas, IStateMachine stateM
         }
 
         Commit = opNumber; // Update commit number *after* successful execution
-
+        
+        if (!_clientTable.TryGetValue(logEntry.Client, out var clientEntry) || clientEntry.Request != logEntry.Request)
+        {
+            Log.Debug(
+                "Replica {ReplicaId}: Ensuring client table entry for Client {ClientId}, Req {RequestNum} during commit of Op {OpNum}. Current Status: {Status}",
+                Replica, logEntry.Client, logEntry.Request, opNumber, Status);
+            UpdateClientTable(logEntry.Client, logEntry.Request, null);
+            _clientTable.TryGetValue(logEntry.Client, out clientEntry); // Re-fetch the entry
+        }
         // Update client table entry for this operation
-        if (_clientTable.TryGetValue(logEntry.Client, out var clientEntry) &&
-            clientEntry.Request == logEntry.Request)
+        if (clientEntry != null && clientEntry.Request == logEntry.Request)
         {
             clientEntry.Executed = true;
             clientEntry.Result = result;
@@ -442,6 +449,43 @@ public class ReplicaState(byte replica, byte totalReplicas, IStateMachine stateM
             Replica, _highestRecoveryViewSeen, primaryResponse.SenderId);
         return (responses, primaryResponse);
     }
+
+    public List<LogEntry> GetAllLogEntries()
+    {
+        return _log.OrderBy(kv => kv.Key)
+            .Select(kv => kv.Value)
+            .ToList();
+    }
+
+    public void ClearClientTable()
+    {
+        Log.Information("Replica {ReplicaId}: Clearing client table.", Replica);
+        _clientTable.Clear();
+        _clientToConnectionMap.Clear(); // Also clear connection mapping
+    }
+
+    public void ReplaceEntireLog(List<LogEntry> newLog)
+    {
+        Log.Information("Replica {ReplicaId}: Replacing entire log. New log contains {Count} entries.",
+            Replica, newLog.Count);
+
+        _log.Clear();
+        _prepareOkCounts.Clear();
+
+        ulong maxOpInNewLog = 0; // Start from 0, might be an empty log
+        foreach (var entry in newLog) // Assume newLog is already sorted by Op
+        {
+            _log[entry.Op] = entry;
+            Log.Debug("Replica {ReplicaId}: Added log entry {Op} from received log.", Replica, entry.Op);
+            if (entry.Op > maxOpInNewLog)
+            {
+                maxOpInNewLog = entry.Op;
+            }
+        }
+
+        Log.Information("Replica {ReplicaId}: Entire log replaced.", Replica);
+    }
+
 
     public void CompleteRecovery()
     {

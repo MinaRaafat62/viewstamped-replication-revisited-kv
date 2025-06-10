@@ -277,16 +277,11 @@ public class ReplicaConnectionManager : IAsyncDisposable
     /// <summary>
     /// Represents the state of a connection to a replica.
     /// </summary>
-    private class ReplicaState
+    private class ReplicaState(IPEndPoint endpoint)
     {
-        public IPEndPoint Endpoint { get; }
+        public IPEndPoint Endpoint { get; } = endpoint;
         public ConnectionId? ConnectionId { get; set; }
         public DateTime LastConnectAttempt { get; set; } = DateTime.MinValue;
         public int ConsecutiveFailures { get; set; }
-
-        public ReplicaState(IPEndPoint endpoint)
-        {
-            Endpoint = endpoint;
-        }
     }
 }

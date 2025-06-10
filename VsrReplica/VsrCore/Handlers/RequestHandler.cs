@@ -138,17 +138,8 @@ public class RequestHandler : IVsrCommandHandler
                         "Replica {ReplicaId} (Primary): Sending REPLY for Op={OpNumber}, Req={RequestNum} to Client Connection {ConnId}",
                         state.Replica, currentOp, logEntry.Request, clientConnId.Id);
                     using var serializedReply = VsrMessageSerializer.SerializeMessage(replyMessage, state.MemoryPool);
-                    try
-                    {
-                        await context.SendAsync(clientConnId, serializedReply).ConfigureAwait(false);
-                    }
-                    catch (Exception ex)
-                    {
-                        Log.Warning(ex,
-                            "Replica {ReplicaId} (Primary): Failed to send REPLY for Op={OpNumber} to Client Connection {ConnId}. Client might have disconnected.",
-                            state.Replica, currentOp, clientConnId.Id);
-                        // The reply is stored in the client table, so if the client reconnects and asks again, we can send it.
-                    }
+                    await context.SendAsync(clientConnId, serializedReply).ConfigureAwait(false);
+                  
                 }
                 else
                 {
