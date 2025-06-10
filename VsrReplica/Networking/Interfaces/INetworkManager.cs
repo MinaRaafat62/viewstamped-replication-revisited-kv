@@ -11,4 +11,6 @@ public interface INetworkManager : IAsyncDisposable
     ValueTask SendAsync(ConnectionId connectionId, ReadOnlyMemory<byte> data);
     ValueTask BroadcastAsync(IEnumerable<ConnectionId> connectionIds, ReadOnlyMemory<byte> data);
     IPEndPoint? LocalEndPoint { get; }
+    List<ConnectionId> GetOtherReplicasConnectionIds();
+    ConnectionId? GetConnectionIdForReplica(byte replicaId);
 }

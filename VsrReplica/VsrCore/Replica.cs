@@ -1,0 +1,213 @@
+using System.IO.Pipelines;
+using System.Net;
+using Serilog;
+using VsrReplica.Networking;
+using VsrReplica.Networking.Interfaces;
+using VsrReplica.Networking.MemoryPool;
+using VsrReplica.Networking.Transport;
+using VsrReplica.VsrCore.Application;
+using VsrReplica.VsrCore.Messages;
+using VsrReplica.VsrCore.ReplicaInternals;
+using VsrReplica.VsrCore.State;
+using VsrReplica.VsrCore.Timers;
+
+namespace VsrReplica.VsrCore;
+
+public class Replica : IDisposable
+{
+    private readonly INetworkManager _networkManager;
+    private readonly ApplicationPipeline<VsrMessage> _applicationPipeline;
+    private readonly ReplicaState _state;
+    private readonly Dictionary<byte, IPEndPoint> _replicaMap;
+    private readonly CancellationTokenSource _cts = new();
+    private readonly ReplicaLifecycleManager _lifecycleManager;
+    private readonly IReplicaContext _replicaContext;
+
+
+    public Replica(NetworkProtocol protocol, Dictionary<byte, IPEndPoint> replicaMap)
+    {
+        if (protocol == NetworkProtocol.Udp)
+        {
+            throw new NotImplementedException("UDP protocol is not implemented yet.");
+        }
+
+        _applicationPipeline = new ApplicationPipeline<VsrMessage>();
+        ReplicaHandlers.RegisterCommandHandlers();
+        var memoryPool = new PinnedBlockMemoryPool();
+        var senderPool = new SenderPool(() => new Sender(), 200); // Factory for Sender
+        var transportScheduler = new IoQueue();
+        var applicationScheduler = PipeScheduler.ThreadPool;
+        var serializer = new VsrMessageSerializer();
+        byte? selfReplicaId = null;
+        foreach (var kvp in replicaMap.Where(kvp => Equals(kvp.Value, NetworkConfig.Replica)))
+        {
+            selfReplicaId = kvp.Key;
+            break;
+        }
+
+        if (!selfReplicaId.HasValue)
+        {
+            throw new InvalidOperationException(
+                $"Could not find own endpoint {NetworkConfig.Replica} in the provided replica map.");
+        }
+
+        _replicaMap = replicaMap;
+
+        _networkManager = new TcpNetworkManager<VsrMessage>(
+            NetworkConfig.Replica,
+            selfReplicaId.Value,
+            replicaMap,
+            senderPool,
+            transportScheduler,
+            applicationScheduler,
+            memoryPool,
+            serializer,
+            HandleMessageReceived,
+            HandleProcessingError,
+            HandleConnectionClosed,
+            HandleConnectionFailed
+        );
+        _state = new ReplicaState(
+            replica: selfReplicaId.Value,
+            totalReplicas: (byte)replicaMap.Count,
+            new KvStore(),
+            memoryPool);
+
+        Action<InternalEventPipelineItem> enqueueAction = (pipelineMsg) =>
+            _applicationPipeline.EnqueueInternalEventAsync(pipelineMsg.Type).AsTask().Wait();
+
+        IReplicaTimer primaryMonitorTimer = new PrimaryMonitorTimer(_state.Replica, enqueueAction);
+        IReplicaTimer primaryIdleCommitTimer = new PrimaryIdleCommitTimer(_state.Replica, enqueueAction);
+
+        _lifecycleManager = new ReplicaLifecycleManager(
+            _state,
+            primaryMonitorTimer,
+            primaryIdleCommitTimer
+        );
+
+        _replicaContext = new ReplicaContext(
+            _state,
+            _applicationPipeline,
+            _networkManager,
+            _lifecycleManager.InitiateRecoveryProtocolAsync
+        );
+
+        _lifecycleManager.SetReplicaContext(_replicaContext);
+    }
+
+    private async Task ProcessMessagesAsync(CancellationToken cancellationToken = default)
+    {
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            var message = await _applicationPipeline.DequeueItemAsync(cancellationToken);
+            try
+            {
+                bool statePotentiallyChanged;
+                switch (message.Type)
+                {
+                    case PipelineMessageType.NetworkMessage:
+                    {
+                        var networkMessage = ((NetworkPipelineItem)message);
+                        var connectionId = networkMessage.ConnectionId;
+                        var vsrMessage = networkMessage.Message;
+                        var handler = ReplicaHandlers.GetCommandHandler(vsrMessage.Header.Command);
+                        await handler.HandleCommandAsync(vsrMessage, connectionId, _replicaContext);
+                        _lifecycleManager.NotifyActivity(networkMessage.Message.Header.Replica,
+                            networkMessage.Message.Header.Command);
+                        statePotentiallyChanged = true;
+                        break;
+                    }
+                    case PipelineMessageType.PrimaryTimeout:
+                    {
+                        await _lifecycleManager.HandlePrimaryTimeout();
+                        statePotentiallyChanged = true;
+                        break;
+                    }
+                    case PipelineMessageType.SendIdleCommit:
+                    {
+                        await _lifecycleManager.HandleSendIdleCommit();
+                        statePotentiallyChanged = false;
+                        break;
+                    }
+                    case PipelineMessageType.PrepareSent:
+                    {
+                        statePotentiallyChanged = false;
+                        break;
+                    }
+                    default:
+                        throw new ArgumentOutOfRangeException(
+                            $"Unknown message type: {message.Type}. This should not happen.");
+                }
+
+                if (statePotentiallyChanged)
+                {
+                    _lifecycleManager.UpdateTimerStates();
+                }
+            }
+            finally
+            {
+                message?.Dispose();
+            }
+        }
+    }
+
+    private async ValueTask HandleMessageReceived(ConnectionId connectionId, VsrMessage message)
+    {
+        // Log.Debug("Replica Received a new Message {Message}", message);
+        await _applicationPipeline.EnqueueNetworkMessageAsync(message, connectionId);
+    }
+
+    private ValueTask HandleProcessingError(ConnectionId connectionId, Exception ex)
+    {
+        Log.Error(ex, "App: Processing error on connection {ConnId}", connectionId);
+        return ValueTask.CompletedTask;
+    }
+
+    private ValueTask HandleConnectionClosed(ConnectionId connectionId, IPEndPoint? endpoint, bool isOtherReplica,
+        Exception? ex)
+    {
+        Log.Error(ex, "App: Connection {ConnId} closed. Is other replica: {IsOtherReplica}", connectionId,
+            isOtherReplica);
+        _lifecycleManager.UpdateTimerStates();
+        return ValueTask.CompletedTask;
+    }
+
+    private ValueTask HandleConnectionFailed(IPEndPoint endpoint, Exception exception)
+    {
+        Log.Warning(exception, "App: Explicit connection attempt to {EndPoint} failed. Background retry active.",
+            endpoint);
+        _lifecycleManager.UpdateTimerStates();
+        return ValueTask.CompletedTask;
+    }
+
+
+    public void Start(CancellationToken cancellationToken = default)
+    {
+        var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token, cancellationToken);
+        var token = linkedCts.Token;
+        _ = _networkManager.StartAsync();
+        _ = ProcessMessagesAsync(token);
+    }
+
+    public void Dispose()
+    {
+        Log.Information("Replica {ReplicaId}: Disposing...", _state.Replica);
+        if (!_cts.IsCancellationRequested)
+        {
+            _cts.Cancel();
+        }
+
+        _lifecycleManager?.Dispose();
+        _networkManager?.DisposeAsync().AsTask().Wait(TimeSpan.FromSeconds(5));
+        _applicationPipeline?.DisposeAsync().AsTask().Wait(TimeSpan.FromSeconds(1));
+        _cts.Dispose();
+        Log.Information("Replica {ReplicaId}: Disposal complete.", _state.Replica);
+        GC.SuppressFinalize(this);
+    }
+}
+
+public enum NetworkProtocol
+{
+    Tcp,
+    Udp
+}
